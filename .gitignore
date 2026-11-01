@@ -23,3 +23,10 @@ SAMUS-main/checkpoints/
 
 # ===== 中间产物：训练日志 =====
 *.log
+
+# ===== 数据集图片（体积大，不入库；训练时本地放置）=====
+SAMUS-main/dataset/SAMUS/KTD/img/
+SAMUS-main/dataset/SAMUS/KTD/label/
+SAMUS-main/dataset/SAMUS/TN3K/img
+SAMUS-main/dataset/SAMUS/TN3K/label
+SAMUS-main/dataset/SAMUS/TN3K/crop_img/
