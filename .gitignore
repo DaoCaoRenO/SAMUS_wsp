@@ -6,3 +6,20 @@ Untitled-2.py
 .vscode/launch.json
 SAMUS-main/english.txt
 SAMUS-main/englist.py
+SAMUS-main/result/
+SAMUS-main/utils/__pycache__/
+SAMUS-main/models/segment_anything/modeling/__pycache__/
+SAMUS-main/tensorboard/
+SAMUS-main/models/segment_anything/utils/__pycache__/
+SAMUS-main/models/segment_anything/__pycache__/
+
+# ===== 中间产物：Python 编译缓存（统一忽略）=====
+__pycache__/
+*.pyc
+
+# ===== 中间产物：训练输出的权重/checkpoint =====
+SAMUS-main/checkpoints/
+*.pth
+
+# ===== 中间产物：训练日志 =====
+*.log

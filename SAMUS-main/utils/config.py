@@ -44,7 +44,7 @@ class Config_TN3K:
 
     workers = 0                  # number of data loading workers (default: 8)
     epochs = 400                 # number of total epochs to run (default: 400)
-    batch_size = 8               # batch size (default: 4)
+    batch_size = 8              # batch size (default: 4)
     learning_rate = 1e-4         # initial learning rate (default: 0.001)
     momentum = 0.9               # momentum
     classes = 2                  # the number of classes (background + foreground)
