@@ -38,7 +38,7 @@ class Config_TN3K:
     save_path = "./checkpoints/TN3K/"
     result_path = "./result/TN3K/"
     tensorboard_path = "./tensorboard/TN3K/"
-    load_path = save_path + "/SAMUS_01111456_352_0.8360216348510668.pth" # SAMUS_12291902_47_0.8595338325001363.pth   SAMUS_01081717_8_0.42477967570244357.pth
+    load_path = save_path + "/SAMUS_11020447_270_0.8349628402308167.pth" # 测试评估用 best
     load_classifier_path = save_path + "/Resnet18_01032018_59_0.7805483249970666.pth"
     save_path_code = "_"
 
