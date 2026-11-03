@@ -164,10 +164,11 @@ def visual_compare(image_filename,pred,gt,opt,epoch):
     # plt.tight_layout()
     # plt.show()
     # 指定保存目录和文件名
+    vis_folder = getattr(opt, 'vis_folder', str(epoch))  # 训练时由 train 设为 _latest/best；测试时回退 epoch
     if 'KTD' in opt.data_path:
-        output_dir = opt.result_path + "/Merge-" + opt.modelname +"/KTD"+ "/" + str(epoch) + "/"  # 指定目录
+        output_dir = opt.result_path + "/Merge-" + opt.modelname +"/KTD" + "/" + vis_folder + "/"  # 指定目录
     else:
-        output_dir = opt.result_path + "/Merge-" + opt.modelname + "/"+str(epoch)+"/"  # 指定目录
+        output_dir = opt.result_path + "/Merge-" + opt.modelname + "/" + vis_folder + "/"  # 指定目录
 
     output_file = image_filename  # 指定文件名
     # fulldir = opt.result_path + "/PT3-" + "img" + "/"

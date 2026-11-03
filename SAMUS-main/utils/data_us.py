@@ -157,8 +157,12 @@ class JointTransform2D:
 
     def __init__(self, img_size=256, low_img_size=256, ori_size=256, crop=(32, 32), p_flip=0.0, p_rota=0.0, p_scale=0.0, p_gaussn=0.0, p_contr=0.0,
                  p_gama=0.0, p_distor=0.0, color_jitter_params=(0.1, 0.1, 0.1, 0.1), p_random_affine=0,
-                 long_mask=False):
+                 long_mask=False, p_freq=0.0, freq_alpha=0.1, freq_sigma=0.1):
         self.crop = crop
+        # 频域幅度随机化增广（方案A）：p_freq=0 时完全关闭，等价原始行为
+        self.p_freq = p_freq
+        self.freq_alpha = freq_alpha   # 幅度扰动强度
+        self.freq_sigma = freq_sigma   # 低频随机场的频段尺度（越小越偏低频/风格）
         self.p_flip = p_flip
         self.p_rota = p_rota
         self.p_scale = p_scale
@@ -233,6 +237,9 @@ class JointTransform2D:
         image, mask = F.resize(image, (self.img_size, self.img_size), InterpolationMode.BILINEAR), F.resize(mask, (self.ori_size, self.ori_size), InterpolationMode.NEAREST)
         low_mask = F.resize(mask, (self.low_img_size, self.low_img_size), InterpolationMode.NEAREST)
         image = F.to_tensor(image)
+        # 频域幅度随机化：仅扰动 image 的低频幅度谱、保留相位(内容/形状)，mask 不受影响
+        if self.p_freq > 0 and np.random.rand() < self.p_freq:
+            image = self._freq_perturb(image)
 
         if not self.long_mask:
             mask = F.to_tensor(mask)
@@ -241,6 +248,21 @@ class JointTransform2D:
             mask = to_long_tensor(mask)
             low_mask = to_long_tensor(low_mask)
         return image, mask, low_mask
+
+    def _freq_perturb(self, img):
+        # img: float tensor (C,H,W) in [0,1]。对幅度谱施加低频随机调制，相位不变
+        H, W = img.shape[-2], img.shape[-1]
+        Fc = torch.fft.fft2(img, dim=(-2, -1))
+        amp, pha = Fc.abs(), Fc.angle()
+        fh = max(2, int(round(H * self.freq_sigma)))
+        fw = max(2, int(round(W * self.freq_sigma)))
+        field = torch.randn(1, 1, fh, fw, device=img.device, dtype=amp.dtype)
+        field = torch.nn.functional.interpolate(field, size=(H, W), mode='bilinear', align_corners=False)
+        field = field.squeeze(0).squeeze(0)  # (H,W)
+        amp_new = amp * (1.0 + self.freq_alpha * field)  # (C,H,W)*(H,W) 广播
+        Fnew = amp_new * torch.exp(1j * pha)
+        out = torch.fft.ifft2(Fnew, dim=(-2, -1)).real.clamp_(0, 1)
+        return out
 
 
 class ImageToImage2D(Dataset):

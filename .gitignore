@@ -1,32 +1,64 @@
-SAMUS-main/sam_vit_b_01ec64.pth
-SAMUS-main/utils/__pycache__/config.cpython-311.pyc
-sam_vit_b_01ec64.pth
-tank.py
-Untitled-2.py
-.vscode/launch.json
-SAMUS-main/english.txt
-SAMUS-main/englist.py
-SAMUS-main/result/
-SAMUS-main/utils/__pycache__/
-SAMUS-main/models/segment_anything/modeling/__pycache__/
-SAMUS-main/tensorboard/
-SAMUS-main/models/segment_anything/utils/__pycache__/
-SAMUS-main/models/segment_anything/__pycache__/
+# ================= 仓库只跟踪源代码，其余全部忽略 =================
 
-# ===== 中间产物：Python 编译缓存（统一忽略）=====
+# ---- Python 编译缓存 ----
 __pycache__/
 *.pyc
+*.pyo
 
-# ===== 中间产物：训练输出的权重/checkpoint =====
-SAMUS-main/checkpoints/
+# ---- IDE / 编辑器配置 ----
+.idea/
+.vscode/
+*.iml
+
+# ---- 训练产物：权重 / checkpoint / 日志 / 可视化输出 ----
 *.pth
-
-# ===== 中间产物：训练日志 =====
+*.pt
+*.pkl
+*.ckpt
+checkpoints/
+result/
+tensorboard/
 *.log
 
-# ===== 数据集图片（体积大，不入库；训练时本地放置）=====
-SAMUS-main/dataset/SAMUS/KTD/img/
-SAMUS-main/dataset/SAMUS/KTD/label/
-SAMUS-main/dataset/SAMUS/TN3K/img
-SAMUS-main/dataset/SAMUS/TN3K/label
-SAMUS-main/dataset/SAMUS/TN3K/crop_img/
+# ---- 媒体文件（图片）----
+*.jpg
+*.jpeg
+*.png
+*.bmp
+*.tif
+*.tiff
+*.gif
+
+# ---- 论文文档 / 表格 / 压缩包（非代码）----
+*.pdf
+*.xlsx
+*.xls
+*.ppt
+*.pptx
+*.doc
+*.docx
+*.zip
+*.rar
+*.7z
+
+# ---- 大目录：论文库 / 示例数据 / 肾脏样例 / 原始代码归档副本 ----
+papers/
+PapersWithoutCertificate/
+Kidney_examples/
+SAMUS-main_baseline/
+SAMUS-main/example_of_required_dataset_format/
+
+# ---- 数据集内的图像/标签目录或软链（保留 *.txt / *.json / *.yaml 清单）----
+SAMUS-main/dataset/SAMUS/**/img
+SAMUS-main/dataset/SAMUS/**/label
+SAMUS-main/dataset/SAMUS/**/imgs
+SAMUS-main/dataset/SAMUS/**/masks
+SAMUS-main/dataset/SAMUS/**/crop_img
+
+# ---- 历史遗留杂项脚本 / 草稿 ----
+tank.py
+tes.py
+Untitled*
+SAMUS-main/english.txt
+SAMUS-main/englist.py
+SAMUS-main/sam_vit_b_01ec64.pth

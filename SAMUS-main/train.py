@@ -1,5 +1,6 @@
 from ast import arg
 import os
+import shutil
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'  # 本机单卡4090，原代码为'8'
 import argparse
 from pickle import FALSE, TRUE
@@ -48,12 +49,26 @@ def main():
     parser.add_argument('--warmup', type=bool, default=False, help='If activated, warp up the learning from a lower lr to the base_lr') 
     parser.add_argument('--warmup_period', type=int, default=250, help='Warp up iterations, only valid whrn warmup is activated')
     parser.add_argument('-keep_log', type=bool, default=True, help='keep the loss&lr&dice during training or not')
+    # ---- 实验开关：频域增广 / 训练轮数 / 输出隔离（均默认保留原始行为）----
+    parser.add_argument('--epochs', type=int, default=None, help='覆盖 config 的训练轮数；None 则用 config')
+    parser.add_argument('--out_tag', type=str, default='', help='为 save/result/tensorboard 路径加后缀，隔离不同实验（如 base50 / freq50）')
+    parser.add_argument('--freq_aug', type=int, default=0, help='1=开启频谱随机化增广（方案A），0=原始行为')
+    parser.add_argument('--freq_p', type=float, default=0.5, help='每张图施加频域增广的概率')
+    parser.add_argument('--freq_alpha', type=float, default=0.1, help='幅度谱扰动强度')
+    parser.add_argument('--freq_sigma', type=float, default=0.1, help='低频随机场尺度')
 
     args = parser.parse_args()
     opt = get_config(args.task)
     args.batch_size = opt.batch_size
     args.device = opt.device
     args.base_lr = opt.learning_rate
+    # 实验参数覆盖：训练轮数 + 输出目录隔离
+    if args.epochs is not None:
+        opt.epochs = args.epochs
+    if args.out_tag:
+        opt.save_path = opt.save_path.rstrip('/') + '_' + args.out_tag + '/'
+        opt.result_path = opt.result_path.rstrip('/') + '_' + args.out_tag + '/'
+        opt.tensorboard_path = opt.tensorboard_path.rstrip('/') + '_' + args.out_tag + '/'
 
     device = torch.device(opt.device)
     if args.keep_log:
@@ -81,7 +96,8 @@ def main():
     opt.batch_size = opt.batch_size * args.n_gpu
 
     tf_train = JointTransform2D(img_size=args.encoder_input_size, low_img_size=args.low_image_size, ori_size=opt.img_size, crop=opt.crop, p_flip=0.0, p_rota=0.5, p_scale=0.5, p_gaussn=0.0,
-                                p_contr=0.5, p_gama=0.5, p_distor=0.0, color_jitter_params=None, long_mask=True)  # image reprocessing
+                                p_contr=0.5, p_gama=0.5, p_distor=0.0, color_jitter_params=None, long_mask=True,
+                                p_freq=(args.freq_p if args.freq_aug else 0.0), freq_alpha=args.freq_alpha, freq_sigma=args.freq_sigma)  # image reprocessing
     tf_val = JointTransform2D(img_size=args.encoder_input_size, low_img_size=args.low_image_size, ori_size=opt.img_size, crop=opt.crop, p_flip=0, color_jitter_params=None, long_mask=True)
     train_dataset = ImageToImage2D(opt.data_path, opt.train_split, tf_train, img_size=args.encoder_input_size)
     val_dataset = ImageToImage2D(opt.data_path, opt.val_split, tf_val, img_size=args.encoder_input_size)  # return image, mask, and filename
@@ -167,6 +183,12 @@ def main():
         #  --------------------------------------------------------- evaluation ----------------------------------------------------------
         if epoch % opt.eval_freq == 0:
             model.eval()
+            # 预测图统一先写入 _latest（每轮覆盖），刷新 best 时再搬到 best/，避免按 epoch 累积
+            vis_root = opt.result_path + "/Merge-" + opt.modelname + "/"
+            latest_dir = vis_root + "_latest"
+            best_vis_dir = vis_root + "best"
+            opt.vis_folder = "_latest"
+            shutil.rmtree(latest_dir, ignore_errors=True)
             dices, mean_dice, _, val_losses = get_eval(valloader, model, criterion=criterion, opt=opt, args=args,epoch=epoch)
             print('epoch [{}/{}], val loss:{:.4f}'.format(epoch, opt.epochs, val_losses))
             print('epoch [{}/{}], val dice:{:.4f}'.format(epoch, opt.epochs, mean_dice))
@@ -176,16 +198,20 @@ def main():
                 dice_log[epoch] = mean_dice
             if mean_dice > best_dice:
                 best_dice = mean_dice
-                timestr = time.strftime('%m%d%H%M')
                 if not os.path.isdir(opt.save_path):
                     os.makedirs(opt.save_path)
-                save_path = opt.save_path + args.modelname + opt.save_path_code + '%s' % timestr + '_' + str(epoch) + '_' + str(best_dice)
-                torch.save(model.state_dict(), save_path + ".pth", _use_new_zipfile_serialization=False)
-        if epoch % opt.save_freq == 0 or epoch == (opt.epochs-1):
+                # 只保留单一最优权重（覆盖），不再按时间戳累积
+                torch.save(model.state_dict(), opt.save_path + args.modelname + "_best.pth", _use_new_zipfile_serialization=False)
+                print('>>> new best dice {:.4f} @ epoch {}, saved best ckpt & images'.format(best_dice, epoch))
+                # 把本轮 _latest 图目录提升为 best/（先删旧 best）
+                if os.path.isdir(latest_dir):
+                    shutil.rmtree(best_vis_dir, ignore_errors=True)
+                    shutil.move(latest_dir, best_vis_dir)
+        # 仅最后一个 epoch 存一份 _last.pth + 写训练曲线（不再每 save_freq 存）
+        if epoch == (opt.epochs-1):
             if not os.path.isdir(opt.save_path):
                 os.makedirs(opt.save_path)
-            save_path = opt.save_path + args.modelname + opt.save_path_code + '_' + str(epoch)
-            torch.save(model.state_dict(), save_path + ".pth", _use_new_zipfile_serialization=False)
+            torch.save(model.state_dict(), opt.save_path + args.modelname + "_last.pth", _use_new_zipfile_serialization=False)
             if args.keep_log:
                 with open(opt.tensorboard_path + args.modelname + opt.save_path_code + logtimestr + '/trainloss.txt', 'w') as f:
                     for i in range(len(loss_log)):

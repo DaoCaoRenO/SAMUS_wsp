@@ -217,11 +217,31 @@ class Config_OurDataset:
     visual = False
     modelname = "SAM"
 # ==================================================================================================
+class Config_DDTIz(Config_TN3K):
+    # 反向零样本验证：TN3K 训练的 SAMUS 测 blsamus 挑战赛 DDTI test(47张)
+    test_split = "test_DDTIz"
+    data_subpath = "./dataset/SAMUS/DDTIz/"
+    load_path = "./checkpoints/TN3K/SAMUS_11020447_270_0.8349628402308167.pth"
+    result_path = "./result/DDTIz/"
+    tensorboard_path = "./tensorboard/DDTIz/"
+
+class Config_PTz(Config_TN3K):
+    # 反向零样本验证：TN3K 训练的 SAMUS 测 blsamus private_Thyroid test(44张)
+    test_split = "test_PTz"
+    data_subpath = "./dataset/SAMUS/PTz/"
+    load_path = "./checkpoints/TN3K/SAMUS_11020447_270_0.8349628402308167.pth"
+    result_path = "./result/PTz/"
+    tensorboard_path = "./tensorboard/PTz/"
+
 def get_config(task="US30K"):
     if task == "US30K":
         return Config_US30K()
     elif task == "TN3K":
         return Config_TN3K()
+    elif task == "DDTIz":
+        return Config_DDTIz()
+    elif task == "PTz":
+        return Config_PTz()
     elif task == 'KTD':
         return  Config_KTD()
     elif task == "BUSI":
