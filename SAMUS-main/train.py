@@ -58,6 +58,11 @@ def main():
     parser.add_argument('--freq_sigma', type=float, default=0.1, help='低频随机场尺度')
     parser.add_argument('--freq_adapter', type=int, default=0, help='1=开启方案C（ParaBlock 内并联可学习频域 Adapter），0=原始结构')
     parser.add_argument('--freq_adapter_share', type=int, default=0, help='1=所有通道共用一组复数滤波器（参数量降为 1/dim）')
+    parser.add_argument('--freq_loss', type=int, default=0, help='1=开启方案D（在分割损失上叠加 Focal Frequency Loss），0=原损失')
+    parser.add_argument('--freq_loss_w', type=float, default=0.1, help='FFL 叠加权重')
+    parser.add_argument('--freq_loss_alpha', type=float, default=1.0, help='FFL focal 指数（0=普通频谱L2）')
+    parser.add_argument('--freq_loss_hf', type=float, default=0.15, help='FFL 只监督 r>=此值 的高频带（0=全带，不建议）')
+    parser.add_argument('--freq_loss_ramp', type=int, default=10, help='FFL 权重前 N 轮线性升温（0=不升温）')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -130,7 +135,14 @@ def main():
         b_lr = args.base_lr
         optimizer = optim.Adam(model.parameters(), lr=args.base_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
    
-    criterion = get_criterion(modelname=args.modelname, opt=opt)
+    criterion = get_criterion(modelname=args.modelname, opt=opt,
+                              freq_loss_w=(args.freq_loss_w if args.freq_loss else 0.0),
+                              freq_loss_alpha=args.freq_loss_alpha,
+                              freq_loss_hf=args.freq_loss_hf,
+                              freq_loss_ramp=args.freq_loss_ramp)
+    if args.freq_loss:
+        print("FreqLoss(FFL) ON: weight={} alpha={} hf_ratio={} ramp_epochs={}".format(
+            args.freq_loss_w, args.freq_loss_alpha, args.freq_loss_hf, args.freq_loss_ramp))
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Total_params: {}".format(pytorch_total_params))
@@ -184,6 +196,8 @@ def main():
 
         #  -------------------------------------------------- log the train progress --------------------------------------------------
         print('epoch [{}/{}], train loss:{:.4f}'.format(epoch, opt.epochs, train_losses / (batch_idx + 1)))
+        if hasattr(criterion, "step_epoch"):   # 方案D：推进频域损失的升温调度
+            criterion.step_epoch()
         if args.keep_log:
             TensorWriter.add_scalar('train_loss', train_losses / (batch_idx + 1), epoch)
             TensorWriter.add_scalar('learning rate', optimizer.state_dict()['param_groups'][0]['lr'], epoch)

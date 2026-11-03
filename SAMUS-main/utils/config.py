@@ -245,6 +245,24 @@ class Config_PTz_fda(Config_PTz):
     data_subpath = "./dataset/SAMUS/PTz_fda/"
     result_path = "./result/PTz_fda/"
 
+class Config_TN3K_hf(Config_TN3K):
+    # 方案E：高频幅度增益后的 TN3K test（域内对照，由 hf_boost.py 生成）
+    test_split = "test_TN3K_hf"
+    data_subpath = "./dataset/SAMUS/TN3K_hf/"
+    result_path = "./result/TN3K_hf/"
+
+class Config_DDTIz_hf(Config_DDTIz):
+    # 方案E：高频幅度增益后的 DDTI test
+    test_split = "test_DDTIz_hf"
+    data_subpath = "./dataset/SAMUS/DDTIz_hf/"
+    result_path = "./result/DDTIz_hf/"
+
+class Config_PTz_hf(Config_PTz):
+    # 方案E：高频幅度增益后的 private_Thyroid test
+    test_split = "test_PTz_hf"
+    data_subpath = "./dataset/SAMUS/PTz_hf/"
+    result_path = "./result/PTz_hf/"
+
 def get_config(task="US30K"):
     if task == "US30K":
         return Config_US30K()
@@ -258,6 +276,12 @@ def get_config(task="US30K"):
         return Config_DDTIz_fda()
     elif task == "PTz_fda":
         return Config_PTz_fda()
+    elif task == "TN3K_hf":
+        return Config_TN3K_hf()
+    elif task == "DDTIz_hf":
+        return Config_DDTIz_hf()
+    elif task == "PTz_hf":
+        return Config_PTz_hf()
     elif task == 'KTD':
         return  Config_KTD()
     elif task == "BUSI":

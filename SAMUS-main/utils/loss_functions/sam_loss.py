@@ -234,7 +234,91 @@ class Mask_BCE_loss(nn.Module):
         loss = self.ce(low_res_logits, target)
         return loss
 
-def get_criterion(modelname='SAM', opt=None):
+def _rfft_radial_mask(H, W, ratio, device, dtype):
+    """构造 rfft2 布局（未 fftshift）下的径向高通掩码：r >= ratio 为 1，否则 0。
+    水平轴为非负频率 0..W//2，垂直轴为自然 FFT 序（含负频）。
+    """
+    fy = torch.fft.fftfreq(H, device=device).to(dtype).abs() * 2.0    # [0,1]
+    fx = torch.fft.rfftfreq(W, device=device).to(dtype) * 2.0         # [0,1]
+    r = torch.sqrt(fy[:, None] ** 2 + fx[None, :] ** 2)
+    return (r >= ratio).to(dtype)
+
+
+def focal_frequency_loss(pred, target, alpha=1.0, hf_ratio=0.0, eps=1e-8):
+    """Focal Frequency Loss (Jiang et al., ICCV 2021) —— 在频谱域上对齐预测 mask 与 GT mask。
+
+    直觉：空域 Dice/BCE 对**边界与细小结构**（即 mask 的高频成分）的梯度贡献被大块平坦区域淹没，
+    而甲状腺结节分割的误差恰恰集中在边界。FFL 把残差搬到频谱，并用 |ΔF|^alpha 作为 focal 权重，
+    自动把优化压力集中到“还没拟合好的频带”上。
+
+    Args:
+        pred:   预测概率图 (N,H,W) 或 (N,1,H,W)，值域 [0,1]（已过 sigmoid）
+        target: GT mask，同形状
+        alpha:  focal 指数，0 退化为普通频谱 L2，1 为原文默认
+        hf_ratio: >0 时**只监督高频带**（r>=hf_ratio）。低频/DC 失配已由 Dice+BCE 负责，
+                重复计入会使初期损失量级爆炸（实测随机预测时全带 9.55 vs 中期 0.038，相差 250 倍）。
+
+    注：返回值按 **GT 频谱能量归一化**（相对频谱误差）。原始 FFL 的量级随 H×W 爆炸
+    （128×128 的二值 mask 实测 ≈ 4e3，而基础分割损失仅 ≈ 0.5），不归一化会直接淹没主损失。
+    """
+    if pred.dim() == 4:
+        pred = pred.squeeze(1)
+    if target.dim() == 4:
+        target = target.squeeze(1)
+    Fp = torch.fft.rfft2(pred.float(), dim=(-2, -1))
+    Fg = torch.fft.rfft2(target.float(), dim=(-2, -1))
+    diff2 = (Fp.real - Fg.real) ** 2 + (Fp.imag - Fg.imag) ** 2      # |ΔF|^2
+    gt2 = Fg.real ** 2 + Fg.imag ** 2
+    if hf_ratio and hf_ratio > 0:                                   # 仅高频带参与监督
+        m = _rfft_radial_mask(pred.shape[-2], pred.shape[-1], hf_ratio, pred.device, diff2.dtype)
+        diff2 = diff2 * m
+        gt2 = gt2 * m
+    w = diff2.detach() ** (alpha / 2.0)                              # focal 权重 = |ΔF|^alpha
+    w = w / (w.amax(dim=(-2, -1), keepdim=True) + eps)                # 逐样本归一化到 [0,1]
+    denom = gt2.sum(dim=(-2, -1)) + eps                               # GT 频谱能量（同带内）
+    return ((w * diff2).sum(dim=(-2, -1)) / denom).mean()
+
+
+class FreqLossWrapper(nn.Module):
+    """在任意基础分割损失上**叠加** FFL（方案D）。
+
+    weight=0 时直接返回基础损失，与原行为逐位相同；不改变任何网络结构。
+    ramp_epochs>0 时前 N 轮线性升温（避免初期频域项压倒主损失）。
+    """
+
+    def __init__(self, base, weight=0.1, alpha=1.0, hf_ratio=0.15, ramp_epochs=0):
+        super(FreqLossWrapper, self).__init__()
+        self.base = base
+        self.weight = weight
+        self.alpha = alpha
+        self.hf_ratio = hf_ratio
+        self.ramp_epochs = ramp_epochs
+        self.epoch = 0            # 由训练循环每轮末尾调用 step_epoch() 推进
+
+    def step_epoch(self):
+        self.epoch += 1
+
+    def cur_weight(self):
+        if self.ramp_epochs > 0 and self.epoch < self.ramp_epochs:
+            return self.weight * (self.epoch + 1) / float(self.ramp_epochs)
+        return self.weight
+
+    def forward(self, net_output, target):
+        loss = self.base(net_output, target)
+        if not self.weight:
+            return loss
+        logits = net_output['low_res_logits']
+        # 与 Mask_DC_and_BCE_loss 保持一致的形状处理
+        if len(target.shape) == 5:
+            target = target.view(-1, target.shape[2], target.shape[3], target.shape[4])
+            logits = logits.view(-1, logits.shape[2], logits.shape[3], logits.shape[4])
+        pred = torch.sigmoid(logits)
+        ffl = focal_frequency_loss(pred, target, alpha=self.alpha, hf_ratio=self.hf_ratio)
+        return loss + self.cur_weight() * ffl
+
+
+def get_criterion(modelname='SAM', opt=None, freq_loss_w=0.0, freq_loss_alpha=1.0,
+                  freq_loss_hf=0.15, freq_loss_ramp=0):
     device = torch.device(opt.device)
     pos_weight = torch.ones([1]).cuda(device=device)*2
     if modelname == "SAMed":
@@ -245,4 +329,7 @@ def get_criterion(modelname='SAM', opt=None):
         criterion = Classification_FocalLoss(num_classes=opt.classifier_classes)
     else:
         criterion = Mask_DC_and_BCE_loss(pos_weight=pos_weight)
+    if freq_loss_w and freq_loss_w > 0:   # 方案D：叠加频域监督
+        criterion = FreqLossWrapper(criterion, weight=freq_loss_w, alpha=freq_loss_alpha,
+                                    hf_ratio=freq_loss_hf, ramp_epochs=freq_loss_ramp)
     return criterion
