@@ -233,6 +233,18 @@ class Config_PTz(Config_TN3K):
     result_path = "./result/PTz/"
     tensorboard_path = "./tensorboard/PTz/"
 
+class Config_DDTIz_fda(Config_DDTIz):
+    # 测试时频谱对齐(FDA)后的 DDTI 子集（低频幅度换到 TN3K 源域统计，由 fda_adapt.py 生成）
+    test_split = "test_DDTIz_fda"
+    data_subpath = "./dataset/SAMUS/DDTIz_fda/"
+    result_path = "./result/DDTIz_fda/"
+
+class Config_PTz_fda(Config_PTz):
+    # 测试时频谱对齐(FDA)后的 private_Thyroid 子集
+    test_split = "test_PTz_fda"
+    data_subpath = "./dataset/SAMUS/PTz_fda/"
+    result_path = "./result/PTz_fda/"
+
 def get_config(task="US30K"):
     if task == "US30K":
         return Config_US30K()
@@ -242,6 +254,10 @@ def get_config(task="US30K"):
         return Config_DDTIz()
     elif task == "PTz":
         return Config_PTz()
+    elif task == "DDTIz_fda":
+        return Config_DDTIz_fda()
+    elif task == "PTz_fda":
+        return Config_PTz_fda()
     elif task == 'KTD':
         return  Config_KTD()
     elif task == "BUSI":

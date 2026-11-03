@@ -16,6 +16,7 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import time
 import random
+import json
 from utils.config import get_config
 from utils.evaluation import get_eval
 from importlib import import_module
@@ -49,9 +50,12 @@ def main():
     parser.add_argument('--warmup_period', type=int, default=250, help='Warp up iterations, only valid whrn warmup is activated')
     parser.add_argument('-keep_log', type=bool, default=False, help='keep the loss&lr&dice during training or not')
     parser.add_argument('--device', type=str, default='cuda', help='cuda or cpu')
+    parser.add_argument('--load_path', type=str, default='', help='覆盖 config 的权重路径（用于测试不同 checkpoint）')
 
     args = parser.parse_args()
     opt = get_config(args.task)  # please configure your hyper-parameter
+    if args.load_path:
+        opt.load_path = args.load_path
     print("task", args.task, "checkpoints:", opt.load_path)
     opt.mode = "val"
     #opt.classes=2
@@ -122,6 +126,13 @@ def main():
         print("task", args.task, "checkpoints:", opt.load_path)
         print(mean_dice[1:], mean_hdis[1:], mean_iou[1:], mean_acc[1:], mean_se[1:], mean_sp[1:])
         print(std_dice[1:], std_hdis[1:], std_iou[1:], std_acc[1:], std_se[1:], std_sp[1:])
+        # 机器可读结果行，供跨域对比汇总脚本解析（dice 等为百分值）
+        print("RESULT_JSON " + json.dumps({
+            "task": args.task, "model": args.modelname, "ckpt": os.path.basename(opt.load_path),
+            "dice": float(mean_dice[1]), "hdis": float(mean_hdis[1]), "iou": float(mean_iou[1]),
+            "acc": float(mean_acc[1]), "se": float(mean_se[1]), "sp": float(mean_sp[1]),
+            "dice_std": float(std_dice[1])
+        }))
         # with open("experiments.txt", "a+") as file:
         #     file.write(args.task + " " + args.modelname + "-pt10 " + '%.2f'%(mean_dice[1]) + "±" + '%.2f'%std_dice[1] + " ")
         #     file.write('%.2f'%mean_hdis[1] + "±" + '%.2f'%std_hdis[1] + " ")
