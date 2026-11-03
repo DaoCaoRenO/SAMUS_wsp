@@ -29,9 +29,7 @@ tensorboard/
 *.tiff
 *.gif
 
-# ---- 论文文档 / 表格 / 压缩包（非代码）----
-*.pdf
-*.xlsx
+# ---- 办公文档 / 压缩包（仍非代码，继续忽略）----
 *.xls
 *.ppt
 *.pptx
@@ -40,10 +38,9 @@ tensorboard/
 *.zip
 *.rar
 *.7z
+# 注：论文 PDF(*.pdf) 与数据结果表格(*.xlsx) 按需要保留入库，故此处不再忽略
 
-# ---- 大目录：论文库 / 示例数据 / 肾脏样例 / 原始代码归档副本 ----
-papers/
-PapersWithoutCertificate/
+# ---- 大目录：示例数据 / 肾脏样例 / 原始代码归档副本（论文库 papers 已恢复跟踪）----
 Kidney_examples/
 SAMUS-main_baseline/
 SAMUS-main/example_of_required_dataset_format/
