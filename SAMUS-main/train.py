@@ -56,6 +56,8 @@ def main():
     parser.add_argument('--freq_p', type=float, default=0.5, help='每张图施加频域增广的概率')
     parser.add_argument('--freq_alpha', type=float, default=0.1, help='幅度谱扰动强度')
     parser.add_argument('--freq_sigma', type=float, default=0.1, help='低频随机场尺度')
+    parser.add_argument('--freq_adapter', type=int, default=0, help='1=开启方案C（ParaBlock 内并联可学习频域 Adapter），0=原始结构')
+    parser.add_argument('--freq_adapter_share', type=int, default=0, help='1=所有通道共用一组复数滤波器（参数量降为 1/dim）')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -92,6 +94,9 @@ def main():
     #  =========================================================================== model and data preparation ============================================================================
     
     # register the sam model
+    if args.freq_adapter:  # 方案C：必须在构建模型前打开开关
+        from models.segment_anything_samus.modeling.image_encoder import enable_freq_adapter
+        enable_freq_adapter(share=bool(args.freq_adapter_share))
     model = get_model(args.modelname, args=args, opt=opt)
     opt.batch_size = opt.batch_size * args.n_gpu
 
@@ -113,7 +118,7 @@ def main():
                 new_state_dict[k[7:]] = v
             else:
                 new_state_dict[k] = v
-        model.load_state_dict(new_state_dict)
+        model.load_state_dict(new_state_dict, strict=not args.freq_adapter)
       
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
@@ -129,6 +134,10 @@ def main():
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Total_params: {}".format(pytorch_total_params))
+    if args.freq_adapter:
+        fa_all = sum(p.numel() for n, p in model.named_parameters() if "Freq_Adapter" in n)
+        fa_tr = sum(p.numel() for n, p in model.named_parameters() if "Freq_Adapter" in n and p.requires_grad)
+        print("Freq_Adapter params: {} (trainable {} / share={})".format(fa_all, fa_tr, bool(args.freq_adapter_share)))
 
     #  ========================================================================= begin to train the model ============================================================================
     iter_num = 0

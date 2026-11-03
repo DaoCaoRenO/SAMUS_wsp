@@ -132,6 +132,65 @@ class ImageEncoderViT(nn.Module):
         return x
 
 
+# ------------------ 方案C: Block 内并联频域 Adapter ----------------------
+# 默认关闭：关闭时网络结构与权重键和官方 SAMUS 完全一致，旧 checkpoint 可直接加载。
+_FREQ_ADAPTER = {"on": False, "share": False}
+
+
+def enable_freq_adapter(share: bool = False) -> None:
+    """开启后构建的 ParaBlock（仅 window_size==0 的全局块）会并联一个可学习复数滤波 Adapter。
+
+    Args:
+        share: True 则所有通道共用一组滤波器（参数量降到 1/dim）。
+    """
+    _FREQ_ADAPTER["on"] = True
+    _FREQ_ADAPTER["share"] = share
+
+
+class FreqAdapter(nn.Module):
+    """GFNet 风格的全局可学习复数滤波（PEFT 版）。
+
+    token map (B,H,W,C) -> rfft2 -> 逐通道复数乘性调制 -> irfft2 -> 残差回加。
+    滤波系数按 (1 + w) 形式且 w 零附近随机初始化、残差 scale 零初始化，
+    因此接入预训练主干的**初始行为严格等价于恒等映射**（LoRA 式 B=0/A=random）。
+    """
+
+    def __init__(self, dim: int, freq_size: Tuple[int, int] = (32, 32), share: bool = False) -> None:
+        super().__init__()
+        H, W = freq_size
+        self.freq_size = (H, W)
+        self.share = share
+        c = 1 if share else dim
+        nf_w = W // 2 + 1
+        self.w_real = nn.Parameter(torch.empty(c, H, nf_w))
+        self.w_imag = nn.Parameter(torch.empty(c, H, nf_w))
+        # 用局部 Generator 初始化：**不扰动全局随机流**，保证开关前后主干的随机初始化逐元素相同
+        # （否则新增参数会消耗 RNG，使 A/B 对比多出“初始化不同”这一混淆变量）
+        g = torch.Generator().manual_seed(20260000 + dim + H * 1000 + W)
+        with torch.no_grad():
+            self.w_real.copy_(torch.randn(c, H, nf_w, generator=g) * 0.02)
+            self.w_imag.copy_(torch.randn(c, H, nf_w, generator=g) * 0.02)
+        self.scale = nn.Parameter(torch.zeros(1))  # 零初始化 -> 初始输出为 0
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B,H,W,C)
+        B, H, W, C = x.shape
+        wr, wi = self.w_real, self.w_imag
+        if (H, W) != self.freq_size:  # 分辨率不一致时对滤波器做双线性重采样
+            wr = torch.nn.functional.interpolate(wr.unsqueeze(0), size=(H, W // 2 + 1),
+                                                 mode='bilinear', align_corners=False).squeeze(0)
+            wi = torch.nn.functional.interpolate(wi.unsqueeze(0), size=(H, W // 2 + 1),
+                                                 mode='bilinear', align_corners=False).squeeze(0)
+        w = torch.complex(wr, wi)
+        if self.share:
+            w = w.expand(C, -1, -1)
+        xt = x.permute(0, 3, 1, 2).float()  # (B,C,H,W)
+        xf = torch.fft.rfft2(xt, dim=(-2, -1))
+        xf = xf * (1.0 + w.unsqueeze(0).to(xf.dtype))
+        out = torch.fft.irfft2(xf, s=(H, W), dim=(-2, -1))
+        return out.permute(0, 2, 3, 1).to(x.dtype) * self.scale
+
+
 class ParaBlock(nn.Module):
     """Transformer blocks with support of window attention and residual propagation blocks"""
 
@@ -186,6 +245,9 @@ class ParaBlock(nn.Module):
             self.Space_Adapter = qkvAttention(dim=dim, num_heads=num_heads)  # with skip connection
             self.refine_Adapter = SingleConv(in_channels=dim, out_channels=dim)          
             self.scale = 0.5
+            if _FREQ_ADAPTER["on"]:
+                # 方案C：与 Space_Adapter/MLP_Adapter 并联的频域 Adapter（名字含 "Adapter" 故自动可训练）
+                self.Freq_Adapter = FreqAdapter(dim, freq_size=input_size, share=_FREQ_ADAPTER["share"])
         # ---------------------------------------------------
         self.dim = dim
         self.depth = depth
@@ -201,6 +263,8 @@ class ParaBlock(nn.Module):
         if self.window_size == 0:
             sax = self.Space_Adapter(x, cnnx, cnnx) # b h w c
             x = x + sax
+            if hasattr(self, "Freq_Adapter"):  # 方案C：频域并联支路（scale 零初始化，初期为恒等）
+                x = x + self.Freq_Adapter(x)
             cnnx = self.refine_Adapter(cnnx.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
 
         x = self.attn(x)

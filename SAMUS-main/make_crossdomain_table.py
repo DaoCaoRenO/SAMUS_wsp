@@ -9,8 +9,14 @@ MD = os.path.join(HERE, "crossdomain_results.md")
 
 DS_ORDER = ["TN3K", "DDTIz", "PTz"]           # TN3K=域内, 其余=跨域零样本
 DS_LABEL = {"TN3K": "TN3K(域内)", "DDTIz": "DDTI(跨域)", "PTz": "private_Thyroid(跨域)"}
-TAG_ORDER = ["base50", "freq50", "ep270_300"]
-TAG_LABEL = {"base50": "SAMUS 50轮(基线,无频域)", "freq50": "SAMUS 50轮(频谱增广)", "ep270_300": "SAMUS 300轮(原基线 ep270)"}
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "ep270_300"]
+TAG_LABEL = {
+    "base50":     "SAMUS 50轮 对照(无A无C)",
+    "freq50":     "SAMUS 50轮 +A(频谱随机化增广)",
+    "fad50":      "SAMUS 50轮 +C(Block内频域Adapter)",
+    "fadaug50":   "SAMUS 50轮 +A+C",
+    "ep270_300":  "SAMUS 300轮(原基线 ep270)",
+}
 
 rows = {}
 if os.path.exists(JSONL):
@@ -37,7 +43,9 @@ with open(CSV, "w") as f:
                 d["acc"], d["se"], d["sp"], d["hdis"]))
 
 # ---------------- Markdown（以 Dice 为主表 + 全指标明细） ----------------
-lines = ["# SAMUS 频谱增广 A/B — 跨域零样本对比\n"]
+lines = ["# SAMUS 频域改造 A/C 因子消融 — 跨域零样本对比\n"]
+lines.append("A = 训练时频谱随机化增广；C = ParaBlock 内并联可学习复数滤波 Freq_Adapter。"
+             "四组均为 50 轮、同 seed/同初始化/lr 1e-4/bs 8，唯一变量为 A/C 开关。\n")
 lines.append("主指标 **Dice(%)**（越大越好；DDTI/PT 为跨库零样本，HD95 为曼哈顿距离仅供参考）:\n")
 hdr = ["模型"] + [DS_LABEL[ds] for ds in DS_ORDER]
 lines.append("| " + " | ".join(hdr) + " |")
@@ -66,14 +74,30 @@ for tag in TAG_ORDER:
         lines.append("| %s | %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |" % (
             TAG_LABEL.get(tag, tag), ds, d["dice"], d["iou"], d["acc"], d["se"], d["sp"], d["hdis"]))
 
-# 频谱增广净增益（freq50 - base50），仅跨域两列
-lines.append("\n频谱增广净增益 ΔDice（freq50 − base50，百分点）:\n")
-lines.append("| 数据集 | ΔDice |")
-lines.append("|---|---|")
+# ---------------- 2×2 因子消融（均相对 base50 的 ΔDice） ----------------
+lines.append("\n**2×2 因子消融** ΔDice（相对 50轮对照组 base50，百分点；正=有收益）:\n")
+fhdr = ["数据集", "无A无C", "+A", "+C", "+A+C"]
+lines.append("| " + " | ".join(fhdr) + " |")
+lines.append("|" + "|".join(["---"] * len(fhdr)) + "|")
 for ds in DS_ORDER:
-    b = rows.get(("base50", ds)); fr = rows.get(("freq50", ds))
-    if b and fr:
-        lines.append("| %s | %+.2f |" % (ds, fr["dice"] - b["dice"]))
+    b = rows.get(("base50", ds))
+    cells = [DS_LABEL[ds], "0.00 (基准)"]
+    for tag in ("freq50", "fad50", "fadaug50"):
+        d = rows.get((tag, ds))
+        cells.append("%+.2f" % (d["dice"] - b["dice"]) if (b and d) else "-")
+    lines.append("| " + " | ".join(cells) + " |")
+
+# 与 300 轮原基线的差距（50 轮预算下的代价）
+lines.append("\n与 300轮原基线(ep270) 的 ΔDice（50轮各组 − ep270，负=轮数不足代价）:\n")
+lines.append("| 数据集 | base50 | +A | +C | +A+C |")
+lines.append("|---|---|---|---|---|")
+for ds in DS_ORDER:
+    e = rows.get(("ep270_300", ds))
+    cells = [DS_LABEL[ds]]
+    for tag in ("base50", "freq50", "fad50", "fadaug50"):
+        d = rows.get((tag, ds))
+        cells.append("%+.2f" % (d["dice"] - e["dice"]) if (e and d) else "-")
+    lines.append("| " + " | ".join(cells) + " |")
 
 with open(MD, "w") as f:
     f.write("\n".join(lines) + "\n")
