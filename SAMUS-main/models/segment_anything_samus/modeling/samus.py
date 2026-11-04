@@ -17,6 +17,61 @@ from .prompt_encoder import PromptEncoder
 from einops import rearrange
 from .Auto_Prompt_Generator import AutoPromptGenerator
 
+# 方案 coarse-to-fine（渐进式边界精炼）全局开关，由 enable_pbr() 在构建模型前打开
+_PBR = {"on": False, "hidden": 32, "iters": 1}
+
+
+def enable_pbr(hidden: int = 32, iters: int = 1) -> None:
+    """开启渐进式边界精炼头。iters=精炼迭代次数(>1 即渐进式推理)。"""
+    _PBR["on"] = True
+    _PBR["hidden"] = hidden
+    _PBR["iters"] = iters
+
+
+class PBRHead(nn.Module):
+    """渐进式边界精炼头（coarse-to-fine）。
+
+    输入：解码器特征 feat(b,C,h,w) + 粗 mask logits(b,1,H,W)；
+    输出：残差 ΔM(b,1,H,W)。末层**零初始化** -> 接入瞬间 fine==coarse（严格恒等，
+    不破坏预训练主干，沿用 FreqAdapter 的 LoRA 式稳定化思路）。
+
+    机制：用 Sobel(粗mask) 定位边界带，轻量 conv 融合[特征,粗mask,边界带]后
+    只在边界附近产生修正 -> 区域由粗阶段保证、边界由细阶段精炼，解耦二者矛盾。
+    """
+
+    def __init__(self, feat_dim: int = 256, hidden: int = 32) -> None:
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Conv2d(feat_dim, hidden, 1),
+            nn.GroupNorm(1, hidden), nn.GELU(),
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(hidden + 2, hidden, 3, padding=1),
+            nn.GroupNorm(1, hidden), nn.GELU(),
+            nn.Conv2d(hidden, hidden, 3, padding=1),
+            nn.GroupNorm(1, hidden), nn.GELU(),
+        )
+        self.out = nn.Conv2d(hidden, 1, 1)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)   # 零初始化残差 -> 初始恒等
+        # 固定 Sobel 核（不回传）
+        self.register_buffer("kx", torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]]).view(1, 1, 3, 3))
+        self.register_buffer("ky", torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]]).view(1, 1, 3, 3))
+
+    def _sobel(self, m: torch.Tensor) -> torch.Tensor:
+        gx = F.conv2d(m, self.kx.to(m.dtype), padding=1)
+        gy = F.conv2d(m, self.ky.to(m.dtype), padding=1)
+        return torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
+
+    def forward(self, feat: torch.Tensor, coarse_logits: torch.Tensor) -> torch.Tensor:
+        H, W = coarse_logits.shape[-2:]
+        f = F.interpolate(self.proj(feat), size=(H, W), mode="bilinear", align_corners=False)
+        m = torch.sigmoid(coarse_logits)
+        edge = self._sobel(m)
+        x = torch.cat([f, m, edge], dim=1)
+        return self.out(self.fuse(x))   # 残差 ΔM
+
+
 class Samus(nn.Module):
     mask_threshold: float = 0.0
     image_format: str = "RGB"
@@ -59,6 +114,20 @@ class Samus(nn.Module):
         for n, value in self.image_encoder.named_parameters():
           if "cnn_embed" not in n and "post_pos_embed" not in n and "Adapter" not in n and "2.attn.rel_pos" not in n and "5.attn.rel_pos" not in n and "8.attn.rel_pos" not in n and "11.attn.rel_pos" not in n and "upneck" not in n:
             value.requires_grad = False
+
+        if _PBR["on"]:  # 方案 coarse-to-fine：挂载渐进式边界精炼头
+            # 用 RNG 状态快照隔离：PBRHead 的默认 conv 初始化会消耗全局随机流，
+            # 若不隔离会使后续 dataloader shuffle 顺序与 base50 不同，多出混淆变量。
+            cpu_state = torch.get_rng_state()
+            cuda_states = None
+            if torch.cuda.is_available():
+                cuda_states = [torch.cuda.get_rng_state(i) for i in range(torch.cuda.device_count())]
+            self.pbr_head = PBRHead(feat_dim=256, hidden=_PBR["hidden"])  # 256=prompt_embed_dim
+            self.pbr_iters = _PBR["iters"]
+            torch.set_rng_state(cpu_state)
+            if cuda_states is not None:
+                for i, s in enumerate(cuda_states):
+                    torch.cuda.set_rng_state(s, i)
 
     @property
     def device(self) -> Any:
@@ -167,6 +236,13 @@ class Samus(nn.Module):
                     )
         masks = F.interpolate(low_res_masks, (256, 256), mode="bilinear", align_corners=False)
         outputs = {"low_res_logits": low_res_masks, "masks": masks}
+        if _PBR["on"] and hasattr(self, "pbr_head"):  # 方案 coarse-to-fine：渐进式边界精炼
+            fine = low_res_masks
+            for _ in range(self.pbr_iters):        # iters>1 即渐进式推理(逐级锐化)
+                fine = fine + self.pbr_head(imge, fine)
+            outputs["low_res_logits_coarse"] = low_res_masks   # 粗阶段供深监督(纯区域)
+            outputs["low_res_logits"] = fine                    # 主输出改为精炼后(下游 eval/test 自动用 fine)
+            outputs["masks"] = F.interpolate(fine, (256, 256), mode="bilinear", align_corners=False)
         return outputs
         # else:
         #   low_res_masks, masks = [], []

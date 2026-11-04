@@ -53,6 +53,9 @@ def main():
     parser.add_argument('--load_path', type=str, default='', help='覆盖 config 的权重路径（用于测试不同 checkpoint）')
     parser.add_argument('--freq_adapter', type=int, default=0, help='1=按方案C结构构建模型（测试 Freq_Adapter 权重时必须开）')
     parser.add_argument('--freq_adapter_share', type=int, default=0, help='与训练时保持一致：1=通道共用滤波器')
+    parser.add_argument('--c2f', type=int, default=0, help='1=按 coarse-to-fine 结构构建模型（测试 PBR 权重时必须开）')
+    parser.add_argument('--c2f_iters', type=int, default=1, help='与训练一致：PBR 精炼迭代次数(>1 即渐进式推理)')
+    parser.add_argument('--c2f_hidden', type=int, default=32, help='与训练一致：PBR 头隐藏通道数')
 
     args = parser.parse_args()
     opt = get_config(args.task)  # please configure your hyper-parameter
@@ -92,6 +95,9 @@ def main():
     if args.freq_adapter:  # 方案C：构建前打开结构开关，否则多出的 Freq_Adapter 键会导致加载失败
         from models.segment_anything_samus.modeling.image_encoder import enable_freq_adapter
         enable_freq_adapter(share=bool(args.freq_adapter_share))
+    if args.c2f:  # coarse-to-fine：构建前打开 PBR 头开关，否则权重里的 pbr_head 键会因结构缺失被忽略
+        from models.segment_anything_samus.modeling.samus import enable_pbr
+        enable_pbr(hidden=args.c2f_hidden, iters=args.c2f_iters)
     model = get_model(args.modelname, args=args, opt=opt)
     model.to(device)
     model.train()
@@ -104,11 +110,15 @@ def main():
             new_state_dict[k[7:]] = v
         else:
             new_state_dict[k] = v
-    model.load_state_dict(new_state_dict, strict=not args.freq_adapter)
+    model.load_state_dict(new_state_dict, strict=not (args.freq_adapter or args.c2f))
     if args.freq_adapter:
         n_fa = sum(1 for k in new_state_dict if "Freq_Adapter" in k)
         print("freq_adapter=ON, 权重内 Freq_Adapter 键数 =", n_fa)
         assert n_fa > 0, "权重里没有 Freq_Adapter，该 checkpoint 不是方案C训出来的"
+    if args.c2f:
+        n_pbr = sum(1 for k in new_state_dict if "pbr_head" in k)
+        print("c2f=ON, 权重内 pbr_head 键数 =", n_pbr)
+        assert n_pbr > 0, "权重里没有 pbr_head，该 checkpoint 不是 coarse-to-fine 训出来的"
     
 
     optimizer = optim.Adam(model.parameters(), lr=args.base_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)

@@ -381,8 +381,54 @@ class EdgeLossWrapper(nn.Module):
         return loss + self.cur_weight() * el
 
 
+class CoarseToFineLoss(nn.Module):
+    """coarse-to-fine 渐进式边界精炼的**深监督**损失。
+
+    分工：粗阶段(low_res_logits_coarse)只用基础区域损失(Dice+BCE)保区域完整性；
+    细阶段(low_res_logits, 已精炼)用 区域损失 + 边缘损失 锐化边界。
+    这正好修掉 edge50 的短板：边缘损失全局施加时 PT 漏分割，现在区域由粗阶段兼顾。
+    edge_ramp>0 时边缘项前 N 轮线性升温（沿用稳定化经验）。
+    """
+
+    def __init__(self, base, lam_coarse=1.0, lam_fine=1.0, edge_w=0.5, edge_ramp=0):
+        super(CoarseToFineLoss, self).__init__()
+        self.base = base
+        self.lam_coarse = lam_coarse
+        self.lam_fine = lam_fine
+        self.edge_w = edge_w
+        self.edge_ramp = edge_ramp
+        self.epoch = 0
+
+    def step_epoch(self):
+        self.epoch += 1
+        if hasattr(self.base, "step_epoch"):
+            self.base.step_epoch()
+
+    def cur_edge_w(self):
+        if self.edge_ramp > 0 and self.epoch < self.edge_ramp:
+            return self.edge_w * (self.epoch + 1) / float(self.edge_ramp)
+        return self.edge_w
+
+    def forward(self, net_output, target):
+        coarse = net_output['low_res_logits_coarse']
+        fine = net_output['low_res_logits']
+        # 区域损失：粗 + 细（复用基础损失，它会自行处理 5 维 target）
+        l_coarse = self.base({'low_res_logits': coarse}, target)
+        l_fine = self.base({'low_res_logits': fine}, target)
+        # 边缘损失：只加在细阶段
+        t = target
+        if len(t.shape) == 5:
+            t = t.view(-1, t.shape[2], t.shape[3], t.shape[4])
+        f = fine
+        if len(f.shape) == 5:
+            f = f.view(-1, f.shape[2], f.shape[3], f.shape[4])
+        le = edge_loss(torch.sigmoid(f), t)
+        return self.lam_coarse * l_coarse + self.lam_fine * (l_fine + self.cur_edge_w() * le)
+
+
 def get_criterion(modelname='SAM', opt=None, freq_loss_w=0.0, freq_loss_alpha=1.0,
-                  freq_loss_hf=0.15, freq_loss_ramp=0, edge_loss_w=0.0, edge_loss_ramp=0):
+                  freq_loss_hf=0.15, freq_loss_ramp=0, edge_loss_w=0.0, edge_loss_ramp=0,
+                  c2f=0, c2f_lam_coarse=1.0, c2f_lam_fine=1.0, c2f_edge_w=0.5, c2f_edge_ramp=10):
     device = torch.device(opt.device)
     pos_weight = torch.ones([1]).cuda(device=device)*2
     if modelname == "SAMed":
@@ -393,6 +439,9 @@ def get_criterion(modelname='SAM', opt=None, freq_loss_w=0.0, freq_loss_alpha=1.
         criterion = Classification_FocalLoss(num_classes=opt.classifier_classes)
     else:
         criterion = Mask_DC_and_BCE_loss(pos_weight=pos_weight)
+    if c2f:   # coarse-to-fine：深监督(粗区域 + 细区域+边缘)，直接返回，不再叠 freq/edge
+        return CoarseToFineLoss(criterion, lam_coarse=c2f_lam_coarse, lam_fine=c2f_lam_fine,
+                                edge_w=c2f_edge_w, edge_ramp=c2f_edge_ramp)
     if freq_loss_w and freq_loss_w > 0:   # 方案D：叠加频域监督
         criterion = FreqLossWrapper(criterion, weight=freq_loss_w, alpha=freq_loss_alpha,
                                     hf_ratio=freq_loss_hf, ramp_epochs=freq_loss_ramp)

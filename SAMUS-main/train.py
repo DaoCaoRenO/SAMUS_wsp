@@ -66,6 +66,13 @@ def main():
     parser.add_argument('--edge_loss', type=int, default=0, help='1=开启边缘增强（在分割损失上叠加空域 Sobel 边界损失），0=原损失')
     parser.add_argument('--edge_loss_w', type=float, default=1.0, help='边界损失叠加权重')
     parser.add_argument('--edge_loss_ramp', type=int, default=10, help='边界损失权重前 N 轮线性升温（0=不升温）')
+    parser.add_argument('--c2f', type=int, default=0, help='1=开启 coarse-to-fine 渐进式边界精炼头(PBR)+深监督，0=关闭')
+    parser.add_argument('--c2f_iters', type=int, default=1, help='PBR 精炼迭代次数(>1 即渐进式推理)')
+    parser.add_argument('--c2f_hidden', type=int, default=32, help='PBR 头隐藏通道数')
+    parser.add_argument('--c2f_lam_coarse', type=float, default=1.0, help='粗阶段区域损失权重')
+    parser.add_argument('--c2f_lam_fine', type=float, default=1.0, help='细阶段区域损失权重')
+    parser.add_argument('--c2f_edge_w', type=float, default=0.5, help='细阶段边缘损失权重')
+    parser.add_argument('--c2f_edge_ramp', type=int, default=10, help='细阶段边缘损失前 N 轮升温')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -105,6 +112,9 @@ def main():
     if args.freq_adapter:  # 方案C：必须在构建模型前打开开关
         from models.segment_anything_samus.modeling.image_encoder import enable_freq_adapter
         enable_freq_adapter(share=bool(args.freq_adapter_share))
+    if args.c2f:  # coarse-to-fine：构建模型前打开 PBR 头开关
+        from models.segment_anything_samus.modeling.samus import enable_pbr
+        enable_pbr(hidden=args.c2f_hidden, iters=args.c2f_iters)
     model = get_model(args.modelname, args=args, opt=opt)
     opt.batch_size = opt.batch_size * args.n_gpu
 
@@ -126,7 +136,7 @@ def main():
                 new_state_dict[k[7:]] = v
             else:
                 new_state_dict[k] = v
-        model.load_state_dict(new_state_dict, strict=not args.freq_adapter)
+        model.load_state_dict(new_state_dict, strict=not (args.freq_adapter or args.c2f))
       
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
@@ -144,12 +154,20 @@ def main():
                               freq_loss_hf=args.freq_loss_hf,
                               freq_loss_ramp=args.freq_loss_ramp,
                               edge_loss_w=(args.edge_loss_w if args.edge_loss else 0.0),
-                              edge_loss_ramp=args.edge_loss_ramp)
+                              edge_loss_ramp=args.edge_loss_ramp,
+                              c2f=args.c2f, c2f_lam_coarse=args.c2f_lam_coarse,
+                              c2f_lam_fine=args.c2f_lam_fine, c2f_edge_w=args.c2f_edge_w,
+                              c2f_edge_ramp=args.c2f_edge_ramp)
     if args.freq_loss:
         print("FreqLoss(FFL) ON: weight={} alpha={} hf_ratio={} ramp_epochs={}".format(
             args.freq_loss_w, args.freq_loss_alpha, args.freq_loss_hf, args.freq_loss_ramp))
     if args.edge_loss:
         print("EdgeLoss ON: weight={} ramp_epochs={}".format(args.edge_loss_w, args.edge_loss_ramp))
+    if args.c2f:
+        pbr_all = sum(p.numel() for n, p in model.named_parameters() if "pbr_head" in n)
+        pbr_tr = sum(p.numel() for n, p in model.named_parameters() if "pbr_head" in n and p.requires_grad)
+        print("CoarseToFine(PBR) ON: iters={} hidden={} lam_c={} lam_f={} edge_w={} edge_ramp={} | PBR params {} (trainable {})".format(
+            args.c2f_iters, args.c2f_hidden, args.c2f_lam_coarse, args.c2f_lam_fine, args.c2f_edge_w, args.c2f_edge_ramp, pbr_all, pbr_tr))
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Total_params: {}".format(pytorch_total_params))
