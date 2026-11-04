@@ -9,12 +9,14 @@ MD = os.path.join(HERE, "crossdomain_results.md")
 
 DS_ORDER = ["TN3K", "DDTIz", "PTz"]           # TN3K=域内, 其余=跨域零样本
 DS_LABEL = {"TN3K": "TN3K(域内)", "DDTIz": "DDTI(跨域)", "PTz": "private_Thyroid(跨域)"}
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "ep270_300"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "ep270_300"]
 TAG_LABEL = {
     "base50":     "SAMUS 50轮 对照(无A无C)",
     "freq50":     "SAMUS 50轮 +A(频谱随机化增广)",
     "fad50":      "SAMUS 50轮 +C(Block内频域Adapter)",
     "fadaug50":   "SAMUS 50轮 +A+C",
+    "floss50":    "SAMUS 50轮 +D(FFL频域损失,已崩)",
+    "edge50":     "SAMUS 50轮 +边缘增强(Sobel边界损失)",
     "ep270_300":  "SAMUS 300轮(原基线 ep270)",
 }
 

@@ -317,8 +317,72 @@ class FreqLossWrapper(nn.Module):
         return loss + self.cur_weight() * ffl
 
 
+def _sobel_grad(x):
+    """x: (N,H,W) -> Sobel 梯度幅值 (N,H,W)。固定核、replicate padding，不回传核参数。"""
+    kx = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
+    ky = torch.tensor([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
+    x4 = x.unsqueeze(1)
+    gx = F.conv2d(x4, kx, padding=1, groups=1)
+    gy = F.conv2d(x4, ky, padding=1, groups=1)
+    return torch.sqrt(gx ** 2 + gy ** 2 + 1e-6).squeeze(1)
+
+
+def edge_loss(pred, target):
+    """空域边界增强损失：对齐预测概率图与 GT 的 Sobel 梯度幅值（L1）。
+
+    直觉：Dice/BCE 被大块平坦区主导，轮廓(空间高频)监督不足，而跨域误差恰恰集中在边界
+    (HD95 高达 45~51)。直接对齐梯度图把优化压力集中到轮廓。
+    与崩掉的频域 FFL 不同：概率图∈[0,1]，Sobel 梯度**有界**，数值稳定，无需归一化爆炸。
+    """
+    if pred.dim() == 4:
+        pred = pred.squeeze(1)
+    if target.dim() == 4:
+        target = target.squeeze(1)
+    gp = _sobel_grad(pred.float())
+    gt = _sobel_grad(target.float())
+    return (gp - gt).abs().mean(dim=(-2, -1)).mean()   # 逐样本平均再 batch 平均
+
+
+class EdgeLossWrapper(nn.Module):
+    """在任意基础分割损失上**叠加**空域边界损失（边缘增强）。
+
+    weight=0 时直接返回基础损失，与原行为逐位相同；不改网络结构。
+    ramp_epochs>0 时前 N 轮线性升温（沿用 FreqLossWrapper 的稳定化经验）。
+    """
+
+    def __init__(self, base, weight=1.0, ramp_epochs=0):
+        super(EdgeLossWrapper, self).__init__()
+        self.base = base
+        self.weight = weight
+        self.ramp_epochs = ramp_epochs
+        self.epoch = 0            # 由训练循环每轮末尾调用 step_epoch() 推进
+
+    def step_epoch(self):
+        self.epoch += 1
+        if hasattr(self.base, "step_epoch"):   # 嵌套时向内层传播(如 Edge(Freq(base)))
+            self.base.step_epoch()
+
+    def cur_weight(self):
+        if self.ramp_epochs > 0 and self.epoch < self.ramp_epochs:
+            return self.weight * (self.epoch + 1) / float(self.ramp_epochs)
+        return self.weight
+
+    def forward(self, net_output, target):
+        loss = self.base(net_output, target)
+        if not self.weight:
+            return loss
+        logits = net_output['low_res_logits']
+        # 与 Mask_DC_and_BCE_loss 保持一致的形状处理
+        if len(target.shape) == 5:
+            target = target.view(-1, target.shape[2], target.shape[3], target.shape[4])
+            logits = logits.view(-1, logits.shape[2], logits.shape[3], logits.shape[4])
+        pred = torch.sigmoid(logits)
+        el = edge_loss(pred, target)
+        return loss + self.cur_weight() * el
+
+
 def get_criterion(modelname='SAM', opt=None, freq_loss_w=0.0, freq_loss_alpha=1.0,
-                  freq_loss_hf=0.15, freq_loss_ramp=0):
+                  freq_loss_hf=0.15, freq_loss_ramp=0, edge_loss_w=0.0, edge_loss_ramp=0):
     device = torch.device(opt.device)
     pos_weight = torch.ones([1]).cuda(device=device)*2
     if modelname == "SAMed":
@@ -332,4 +396,6 @@ def get_criterion(modelname='SAM', opt=None, freq_loss_w=0.0, freq_loss_alpha=1.
     if freq_loss_w and freq_loss_w > 0:   # 方案D：叠加频域监督
         criterion = FreqLossWrapper(criterion, weight=freq_loss_w, alpha=freq_loss_alpha,
                                     hf_ratio=freq_loss_hf, ramp_epochs=freq_loss_ramp)
+    if edge_loss_w and edge_loss_w > 0:   # 边缘增强：叠加空域边界监督
+        criterion = EdgeLossWrapper(criterion, weight=edge_loss_w, ramp_epochs=edge_loss_ramp)
     return criterion

@@ -63,6 +63,9 @@ def main():
     parser.add_argument('--freq_loss_alpha', type=float, default=1.0, help='FFL focal 指数（0=普通频谱L2）')
     parser.add_argument('--freq_loss_hf', type=float, default=0.15, help='FFL 只监督 r>=此值 的高频带（0=全带，不建议）')
     parser.add_argument('--freq_loss_ramp', type=int, default=10, help='FFL 权重前 N 轮线性升温（0=不升温）')
+    parser.add_argument('--edge_loss', type=int, default=0, help='1=开启边缘增强（在分割损失上叠加空域 Sobel 边界损失），0=原损失')
+    parser.add_argument('--edge_loss_w', type=float, default=1.0, help='边界损失叠加权重')
+    parser.add_argument('--edge_loss_ramp', type=int, default=10, help='边界损失权重前 N 轮线性升温（0=不升温）')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -139,10 +142,14 @@ def main():
                               freq_loss_w=(args.freq_loss_w if args.freq_loss else 0.0),
                               freq_loss_alpha=args.freq_loss_alpha,
                               freq_loss_hf=args.freq_loss_hf,
-                              freq_loss_ramp=args.freq_loss_ramp)
+                              freq_loss_ramp=args.freq_loss_ramp,
+                              edge_loss_w=(args.edge_loss_w if args.edge_loss else 0.0),
+                              edge_loss_ramp=args.edge_loss_ramp)
     if args.freq_loss:
         print("FreqLoss(FFL) ON: weight={} alpha={} hf_ratio={} ramp_epochs={}".format(
             args.freq_loss_w, args.freq_loss_alpha, args.freq_loss_hf, args.freq_loss_ramp))
+    if args.edge_loss:
+        print("EdgeLoss ON: weight={} ramp_epochs={}".format(args.edge_loss_w, args.edge_loss_ramp))
 
     pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Total_params: {}".format(pytorch_total_params))
