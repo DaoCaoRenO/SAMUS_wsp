@@ -46,6 +46,7 @@ if [ -f "$CKPT" ]; then
     fi
   done
   python3 make_crossdomain_table.py
+  python3 make_bl_comparison.py   # 跨口径性能对比总表(合并 blsamus+SAMUS)，自动写回 探索复盘记录.md
 else
   echo "[edge] 缺权重 $CKPT，跳过测试"
 fi
