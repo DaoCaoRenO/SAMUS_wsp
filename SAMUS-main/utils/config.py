@@ -263,11 +263,48 @@ class Config_PTz_hf(Config_PTz):
     data_subpath = "./dataset/SAMUS/PTz_hf/"
     result_path = "./result/PTz_hf/"
 
+# -------------------------------------------------------------------------------------------------
+class Config_MultiOrgan:
+    """Experiment A: USIC multi-organ (no thyroid) + TN3K → zero-shot thyroid test."""
+    data_path = "./dataset/SAMUS/"
+    data_subpath = "./dataset/SAMUS/TN3K/"  # val/test still from TN3K
+    save_path = "./checkpoints/MultiOrgan/"
+    result_path = "./result/MultiOrgan/"
+    tensorboard_path = "./tensorboard/MultiOrgan/"
+    load_path = save_path + "/SAMUS_best.pth"
+    load_classifier_path = ""
+    save_path_code = "_"
+
+    workers = 0
+    epochs = 100
+    batch_size = 8
+    learning_rate = 1e-4
+    momentum = 0.9
+    classes = 2
+    img_size = 256
+    train_split = "train_multiorgan"   # combined USIC+TN3K split
+    val_split = "val"                  # TN3K val for best ckpt selection
+    test_split = "test"                # not used directly; eval via rag_segment
+    crop = None
+    eval_freq = 1
+    save_freq = 2000
+    device = "cuda"
+    cuda = "on"
+    gray = "yes"
+    img_channel = 1
+    eval_mode = "mask_slice"
+    pre_trained = False
+    mode = "train"
+    visual = False
+    modelname = "SAMUS"
+    segmentation_data_path = ""
 def get_config(task="US30K"):
     if task == "US30K":
         return Config_US30K()
     elif task == "TN3K":
         return Config_TN3K()
+    elif task == "MultiOrgan":
+        return Config_MultiOrgan()
     elif task == "DDTIz":
         return Config_DDTIz()
     elif task == "PTz":

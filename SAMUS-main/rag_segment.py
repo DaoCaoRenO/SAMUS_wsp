@@ -73,6 +73,7 @@ def main():
     ap.add_argument("--out", default=os.path.join(R.HERE, "rag_results.jsonl"))
     ap.add_argument("--emit-table", dest="emit_table", default="",
                     help="给定路径时，把本次(锁定参数)结果 upsert 为该跨域总表 jsonl 的一行 rag 记录")
+    ap.add_argument("--tag", default="", help="覆盖自动标签(rag/raghead); 用于纯基线评测如 multi_tn3k/bl_nothy")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -110,15 +111,28 @@ def main():
             imgs = hfa_boost(imgs, gain=args.stack_e)
         imge = R.dense_feat(model, imgs)                    # (B,256,32,32)
         base_logits = R.model_base_logits(model, imgs)      # (B,1,256,256)
+        # leave-one-out: 传 batch 内图片名给 exclude(源域 bank 自然 no-op，目标域 bank 才屏蔽自身)
+        batch_names = [dp["image_name"][j] if isinstance(dp["image_name"], (list, tuple))
+                       else str(dp["image_name"][j]) for j in range(imgs.shape[0])]
         if head_on:
             # 可学习 PCR 头：检索原型逐位置余弦→残差精炼，替代固定 λ 手工融合
-            sim_fg, sim_bg = R.prototypes_for_query(imge, bank, args.k, exclude=None, retr=args.retr)
+            sim_fg, sim_bg = R.prototypes_for_query(imge, bank, args.k, exclude=batch_names, retr=args.retr)
             fused = model.pcr(imge, base_logits, sim_fg, sim_bg)            # masks_fine (B,1,256,256)
         else:
             # query 全局检索向量(非对称: 均值池化)
             locs = imge.flatten(2).transpose(1, 2)              # (B,1024,256)
             e_q = F.normalize(locs.mean(1), dim=1)
-            idx, sim = R.retrieve(e_q, E_retr, args.k)          # (B,k)
+            # 手动余弦 + exclude (目标域 bank 时屏蔽自身)
+            full_sim = (e_q @ E_retr.t()).clamp(-1, 1)  # (B,N)
+            bank_names = bank.get("names", None)
+            if bank_names is not None:
+                for b_idx in range(full_sim.shape[0]):
+                    nm = batch_names[b_idx]
+                    hit = [i for i, n in enumerate(bank_names) if n == nm]
+                    if hit:
+                        full_sim[b_idx, hit] = -float('inf')
+            topv, topi = torch.topk(full_sim, k=args.k, dim=1)  # (B,k)
+            idx, sim = topi, topv
             w = F.softmax(sim / args.rtemp, dim=1) if args.agg == "softmax" else sim
             P_fg, P_bg = aggregate(bank_gpu, idx, w, args.agg)
             prior = R.similarity_map(imge, P_fg, P_bg, args.tau)         # (B,1,32,32)
@@ -146,7 +160,7 @@ def main():
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     mb = base_arr.mean(0); mr = rag_arr.mean(0)
     rec = {
-        "tag": ("raghead" if head_on else "rag"), "ds": args.task, "split": args.split,
+        "tag": (args.tag if args.tag else ("raghead" if head_on else "rag")), "ds": args.task, "split": args.split,
         "k": args.k, "lambda": args.lam, "tau": args.tau,
         "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e,
         "gate": args.gate, "gscale": args.gscale,
@@ -178,7 +192,10 @@ def emit_table_row(path, rec, mr):
     """把 rag/raghead 行(键 (tag,ds)) upsert 进跨域总表 jsonl，字段对齐 ep270_300 行。"""
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     tag = rec.get("tag", "rag")
-    row = {"task": rec["ds"], "model": "SAMUS", "ckpt": ("rag_pcr_head" if tag == "raghead" else "rag_fused"),
+    ckpt_name = ("rag_pcr_head" if tag == "raghead" else
+                 "multi_organ" if tag == "multi_tn3k" else
+                 "bl_nothy" if tag == "bl_nothy" else "rag_fused")
+    row = {"task": rec["ds"], "model": "SAMUS", "ckpt": ckpt_name,
            "tag": tag, "ds": rec["ds"],
            "params": {"k": rec["k"], "lambda": rec["lambda"], "tau": rec["tau"],
                       "retr": rec["retr"], "agg": rec["agg"], "stack_e": rec["stack_e"]},

@@ -347,8 +347,15 @@ class ImageToImage2D(Dataset):
         else:
             img_path = os.path.join(os.path.join(self.dataset_path, sub_path), 'img')
             label_path = os.path.join(os.path.join(self.dataset_path, sub_path), 'label')
-            image = cv2.imread(os.path.join(img_path, filename + '.jpg'), 0)
-            mask = cv2.imread(os.path.join(label_path, filename + '.jpg'), 0)
+            # Support both .jpg (TN3K) and .png (USIC) extensions
+            img_file = os.path.join(img_path, filename + '.jpg')
+            if not os.path.exists(img_file):
+                img_file = os.path.join(img_path, filename + '.png')
+            lbl_file = os.path.join(label_path, filename + '.jpg')
+            if not os.path.exists(lbl_file):
+                lbl_file = os.path.join(label_path, filename + '.png')
+            image = cv2.imread(img_file, 0)
+            mask = cv2.imread(lbl_file, 0)
 
         classes = self.class_dict[sub_path]
         if classes == 2:
