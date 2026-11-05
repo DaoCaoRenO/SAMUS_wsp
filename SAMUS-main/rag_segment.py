@@ -64,7 +64,8 @@ def main():
     ap.add_argument("--agg", choices=["softmax", "top1"], default="softmax", help="原型聚合方式")
     ap.add_argument("--retr-temp", dest="rtemp", type=float, default=0.1, help="softmax 温度(越小越锐)")
     ap.add_argument("--stack-e", dest="stack_e", type=float, default=1.0, help="方案E 高频增益(1.0=关)")
-    ap.add_argument("--gate", choices=["off", "conf"], default="off", help="先验注入方式：全局均匀 off | 置信度门控 conf")
+    ap.add_argument("--gate", choices=["off", "conf", "hole"], default="off",
+                    help="先验注入方式：全局均匀 off | 置信度门控 conf | 候选框内部空洞填充 hole")
     ap.add_argument("--gscale", type=float, default=4.0, help="置信门控尺度 s（g=exp(-|logit|/s)）")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(R.HERE, "rag_results.jsonl"))
@@ -101,7 +102,14 @@ def main():
         w = F.softmax(sim / args.rtemp, dim=1) if args.agg == "softmax" else sim
         P_fg, P_bg = aggregate(bank_gpu, idx, w, args.agg)
         prior = R.similarity_map(imge, P_fg, P_bg, args.tau)         # (B,1,32,32)
-        fused = R.fuse(base_logits, prior, args.lam, args.gate, args.gscale)   # (B,1,256,256)
+        gmap = None
+        if args.gate == "hole":
+            # 空洞 = base前景的 binary_fill_holes 后新增的背景像素(被前景包围的内腔)
+            from scipy.ndimage import binary_fill_holes
+            sb = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
+            holes = np.stack([binary_fill_holes(s) & ~s for s in sb])   # (B,H,W) bool
+            gmap = torch.from_numpy(holes).float().unsqueeze(1).to(base_logits.device)
+        fused = R.fuse(base_logits, prior, args.lam, args.gate, args.gscale, gmap)   # (B,1,256,256)
         seg_base = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
         seg_rag = (torch.sigmoid(fused)[:, 0] > 0.5).cpu().numpy()
         gtn = gt.cpu().numpy()

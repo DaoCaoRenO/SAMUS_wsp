@@ -122,12 +122,15 @@ def similarity_map(imge_q, P_fg, P_bg, tau):
     return prior.view(B, 1, FEAT, FEAT)
 
 
-def fuse(base_logits, prior32, lam, gate="off", gscale=4.0):
+def fuse(base_logits, prior32, lam, gate="off", gscale=4.0, gmap=None):
     """base_logits(B,1,256,256) + lam * 上采样先验(B,1,32,32→256)。
        gate="conf"：置信度门控 g=exp(-|base_logits|/gscale)∈(0,1]，只在 SAMUS
-       低置信区(|logit|小、判定犹豫)注入先验，高置信区(g→0)保持原判——用「抬召回
-       不伤精度」的方式补区域。gate="off" 即全局均匀加性(上一版行为)。"""
+       低置信区注入先验，高置信区保持原判。
+       gmap 不为 None 时优先用之：逐像素门控张量(B,1,256,256)∈[0,1]，先验只在该区域
+       生效(如 hole-filling 的空洞区)。gate="off" 即全局均匀加性。"""
     prior = F.interpolate(prior32, size=base_logits.shape[-2:], mode="bilinear", align_corners=False)
+    if gmap is not None:
+        return base_logits + lam * gmap * prior
     if gate == "conf":
         g = torch.exp(-(base_logits.abs() / max(gscale, 1e-6)))
         return base_logits + lam * g * prior
