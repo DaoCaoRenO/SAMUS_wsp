@@ -23,7 +23,7 @@ BL_MAP = {"TN3K": "TN3K", "DDTI": "DDTIz", "private_Thyroid": "PTz"}  # blsamus 
 HF_MAP = {"TN3K_hf": "TN3K", "DDTIz_hf": "DDTIz", "PTz_hf": "PTz"}    # 方案E 名 -> SAMUS 键
 
 # 与 make_crossdomain_table.py 对齐的展示顺序与标签
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag"]
 TAG_LABEL = {
     "base50":     "SAMUS专科 50轮对照",
     "freq50":     "SAMUS +A(频谱增广)",
@@ -33,6 +33,7 @@ TAG_LABEL = {
     "edge50":     "SAMUS +边缘增强(Sobel)",
     "c2f50":      "SAMUS +coarse-to-fine(PBR)",
     "ep270_300":  "SAMUS专科 300轮(ep270原基线)",
+    "rag":        "SAMUS ep270 +RAG检索原型先验(免训练)",
 }
 CAL_SAMUS = "专科 · TN3K域内/DDTI,PT**零样本**"
 CAL_BL = "通用多器官 · 甲状腺**多为域内**(训过)"
