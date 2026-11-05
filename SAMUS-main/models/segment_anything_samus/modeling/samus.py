@@ -235,7 +235,7 @@ class Samus(nn.Module):
                     multimask_output=False,
                     )
         masks = F.interpolate(low_res_masks, (256, 256), mode="bilinear", align_corners=False)
-        outputs = {"low_res_logits": low_res_masks, "masks": masks}
+        outputs = {"low_res_logits": low_res_masks, "masks": masks, "imge": imge}
         if _PBR["on"] and hasattr(self, "pbr_head"):  # 方案 coarse-to-fine：渐进式边界精炼
             fine = low_res_masks
             for _ in range(self.pbr_iters):        # iters>1 即渐进式推理(逐级锐化)

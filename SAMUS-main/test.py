@@ -56,6 +56,12 @@ def main():
     parser.add_argument('--c2f', type=int, default=0, help='1=按 coarse-to-fine 结构构建模型（测试 PBR 权重时必须开）')
     parser.add_argument('--c2f_iters', type=int, default=1, help='与训练一致：PBR 精炼迭代次数(>1 即渐进式推理)')
     parser.add_argument('--c2f_hidden', type=int, default=32, help='与训练一致：PBR 头隐藏通道数')
+    # ---- RAG PCR 头评测装配路径(与 train.py 一致) ----
+    parser.add_argument('--rag_head', type=int, default=0, help='1=装配并经过 PCR 头精炼后评测')
+    parser.add_argument('--rag_head_hidden', type=int, default=32, help='PCR 头隐藏通道数(需与训练一致)')
+    parser.add_argument('--rag_k', type=int, default=5, help='检索 top-k')
+    parser.add_argument('--rag_retr', choices=['roi', 'mean'], default='roi', help='检索向量')
+    parser.add_argument('--rag_bank', type=str, default='rag_bank/tn3k_bank.pt', help='源域记忆库 .pt')
 
     args = parser.parse_args()
     opt = get_config(args.task)  # please configure your hyper-parameter
@@ -102,6 +108,10 @@ def main():
     model.to(device)
     model.train()
 
+    if args.rag_head:   # 先挂 PCR 头，才能接住 checkpoint 里的 pcr.* 键
+        from rag_head import build_pcr_head
+        model.pcr = build_pcr_head(hidden=args.rag_head_hidden).to(device)
+
     checkpoint = torch.load(opt.load_path)
     #------when the load model is saved under multiple GPU
     new_state_dict = {}
@@ -110,7 +120,11 @@ def main():
             new_state_dict[k[7:]] = v
         else:
             new_state_dict[k] = v
-    model.load_state_dict(new_state_dict, strict=not (args.freq_adapter or args.c2f))
+    model.load_state_dict(new_state_dict, strict=not (args.freq_adapter or args.c2f or args.rag_head))
+    if args.rag_head:
+        n_pcr = sum(1 for k in new_state_dict if k.startswith("pcr."))
+        print("rag_head=ON, 权重内 pcr.* 键数 =", n_pcr)
+        assert n_pcr > 0, "权重里没有 pcr.*，该 checkpoint 不是 PCR 头训出来的"
     if args.freq_adapter:
         n_fa = sum(1 for k in new_state_dict if "Freq_Adapter" in k)
         print("freq_adapter=ON, 权重内 Freq_Adapter 键数 =", n_fa)
@@ -136,11 +150,18 @@ def main():
 
     model.eval()
 
+    eval_model = model
+    if args.rag_head:   # 走 backbone+PCR 头「检索→精炼」路径，与训练一致(不 shift、不 exclude)
+        import rag_common as R
+        from rag_head import RagEvalRunner
+        rag_bank = torch.load(args.rag_bank, map_location="cpu")
+        eval_model = RagEvalRunner(model, rag_bank, args.rag_k, args.rag_retr)
+
     if opt.mode == "train":
-        dices, mean_dice, _, val_losses = get_eval(valloader, model, criterion=criterion, opt=opt, args=args)
+        dices, mean_dice, _, val_losses = get_eval(valloader, eval_model, criterion=criterion, opt=opt, args=args)
         print("mean dice:", mean_dice)
     else:
-        mean_dice, mean_hdis, mean_iou, mean_acc, mean_se, mean_sp, std_dice, std_hdis, std_iou, std_acc, std_se, std_sp = get_eval(valloader, model, criterion=criterion, opt=opt, args=args,epoch='test')
+        mean_dice, mean_hdis, mean_iou, mean_acc, mean_se, mean_sp, std_dice, std_hdis, std_iou, std_acc, std_se, std_sp = get_eval(valloader, eval_model, criterion=criterion, opt=opt, args=args,epoch='test')
         print("dataset:" + args.task + " -----------model name: "+ args.modelname)
         print("task", args.task, "checkpoints:", opt.load_path)
         print(mean_dice[1:], mean_hdis[1:], mean_iou[1:], mean_acc[1:], mean_se[1:], mean_sp[1:])

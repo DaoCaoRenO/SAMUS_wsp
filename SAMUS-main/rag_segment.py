@@ -67,6 +67,8 @@ def main():
     ap.add_argument("--gate", choices=["off", "conf", "hole"], default="off",
                     help="先验注入方式：全局均匀 off | 置信度门控 conf | 候选框内部空洞填充 hole")
     ap.add_argument("--gscale", type=float, default=4.0, help="置信门控尺度 s（g=exp(-|logit|/s)）")
+    ap.add_argument("--head_ckpt", default="", help="给定则用训练好的 PCR 头产 masks_fine(替代固定 λ 融合)")
+    ap.add_argument("--head_hidden", type=int, default=32, help="PCR 头隐藏通道数(需与训练一致)")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(R.HERE, "rag_results.jsonl"))
     ap.add_argument("--emit-table", dest="emit_table", default="",
@@ -78,6 +80,19 @@ def main():
     bank = torch.load(args.bank, map_location="cpu")
     E_retr = bank["E_roi" if args.retr == "roi" else "E_mean"].to(device)
     bank_gpu = {"E_roi": bank["E_roi"].to(device), "P_bg": bank["P_bg"].to(device)}
+
+    head_on = bool(args.head_ckpt)
+    if head_on:
+        from rag_head import build_pcr_head
+        model.pcr = build_pcr_head(hidden=args.head_hidden).to(device)
+        sd = torch.load(args.head_ckpt, map_location="cpu")
+        sd = {(k[7:] if k[:7] == "module." else k): v for k, v in sd.items()}
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        n_pcr = sum(1 for k in sd if k.startswith("pcr."))
+        print(f"[rag] HEAD ON ckpt={args.head_ckpt} pcr_keys={n_pcr} "
+              f"missing={len(missing)} unexpected={len(unexpected)}", flush=True)
+        assert n_pcr > 0, "head_ckpt 里没有 pcr.* 键，不是 PCR 头训出来的"
+        model.eval()
 
     split = opt.test_split if args.split == "test" else opt.val_split
     if args.task == "TN3K":
@@ -95,21 +110,26 @@ def main():
             imgs = hfa_boost(imgs, gain=args.stack_e)
         imge = R.dense_feat(model, imgs)                    # (B,256,32,32)
         base_logits = R.model_base_logits(model, imgs)      # (B,1,256,256)
-        # query 全局检索向量(非对称: 均值池化)
-        locs = imge.flatten(2).transpose(1, 2)              # (B,1024,256)
-        e_q = F.normalize(locs.mean(1), dim=1)
-        idx, sim = R.retrieve(e_q, E_retr, args.k)          # (B,k)
-        w = F.softmax(sim / args.rtemp, dim=1) if args.agg == "softmax" else sim
-        P_fg, P_bg = aggregate(bank_gpu, idx, w, args.agg)
-        prior = R.similarity_map(imge, P_fg, P_bg, args.tau)         # (B,1,32,32)
-        gmap = None
-        if args.gate == "hole":
-            # 空洞 = base前景的 binary_fill_holes 后新增的背景像素(被前景包围的内腔)
-            from scipy.ndimage import binary_fill_holes
-            sb = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
-            holes = np.stack([binary_fill_holes(s) & ~s for s in sb])   # (B,H,W) bool
-            gmap = torch.from_numpy(holes).float().unsqueeze(1).to(base_logits.device)
-        fused = R.fuse(base_logits, prior, args.lam, args.gate, args.gscale, gmap)   # (B,1,256,256)
+        if head_on:
+            # 可学习 PCR 头：检索原型逐位置余弦→残差精炼，替代固定 λ 手工融合
+            sim_fg, sim_bg = R.prototypes_for_query(imge, bank, args.k, exclude=None, retr=args.retr)
+            fused = model.pcr(imge, base_logits, sim_fg, sim_bg)            # masks_fine (B,1,256,256)
+        else:
+            # query 全局检索向量(非对称: 均值池化)
+            locs = imge.flatten(2).transpose(1, 2)              # (B,1024,256)
+            e_q = F.normalize(locs.mean(1), dim=1)
+            idx, sim = R.retrieve(e_q, E_retr, args.k)          # (B,k)
+            w = F.softmax(sim / args.rtemp, dim=1) if args.agg == "softmax" else sim
+            P_fg, P_bg = aggregate(bank_gpu, idx, w, args.agg)
+            prior = R.similarity_map(imge, P_fg, P_bg, args.tau)         # (B,1,32,32)
+            gmap = None
+            if args.gate == "hole":
+                # 空洞 = base前景的 binary_fill_holes 后新增的背景像素(被前景包围的内腔)
+                from scipy.ndimage import binary_fill_holes
+                sb = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
+                holes = np.stack([binary_fill_holes(s) & ~s for s in sb])   # (B,H,W) bool
+                gmap = torch.from_numpy(holes).float().unsqueeze(1).to(base_logits.device)
+            fused = R.fuse(base_logits, prior, args.lam, args.gate, args.gscale, gmap)   # (B,1,256,256)
         seg_base = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
         seg_rag = (torch.sigmoid(fused)[:, 0] > 0.5).cpu().numpy()
         gtn = gt.cpu().numpy()
@@ -126,7 +146,7 @@ def main():
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     mb = base_arr.mean(0); mr = rag_arr.mean(0)
     rec = {
-        "tag": "rag", "ds": args.task, "split": args.split,
+        "tag": ("raghead" if head_on else "rag"), "ds": args.task, "split": args.split,
         "k": args.k, "lambda": args.lam, "tau": args.tau,
         "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e,
         "gate": args.gate, "gscale": args.gscale,
@@ -155,9 +175,11 @@ def se(a): return [float(x) for x in a[:, 3]]
 
 
 def emit_table_row(path, rec, mr):
-    """把 rag 行(键 (tag='rag',ds)) upsert 进跨域总表 jsonl，字段对齐 ep270_300 行。"""
+    """把 rag/raghead 行(键 (tag,ds)) upsert 进跨域总表 jsonl，字段对齐 ep270_300 行。"""
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
-    row = {"task": rec["ds"], "model": "SAMUS", "ckpt": "rag_fused", "tag": "rag", "ds": rec["ds"],
+    tag = rec.get("tag", "rag")
+    row = {"task": rec["ds"], "model": "SAMUS", "ckpt": ("rag_pcr_head" if tag == "raghead" else "rag_fused"),
+           "tag": tag, "ds": rec["ds"],
            "params": {"k": rec["k"], "lambda": rec["lambda"], "tau": rec["tau"],
                       "retr": rec["retr"], "agg": rec["agg"], "stack_e": rec["stack_e"]},
            "dice_std": rec["dice_std"], "base_dice": rec["base_dice"], "base_se": rec["base_se"],
@@ -172,13 +194,13 @@ def emit_table_row(path, rec, mr):
                 d = json.loads(line)
             except Exception:
                 continue
-            if d.get("tag") == "rag" and d.get("ds") == rec["ds"]:
+            if d.get("tag") == tag and d.get("ds") == rec["ds"]:
                 continue
             rows.append(line)
     rows.append(json.dumps(row))
     with open(path, "w") as f:
         f.write("\n".join(rows) + "\n")
-    print(f"[rag] upsert tag=rag ds={rec['ds']} -> {path}")
+    print(f"[rag] upsert tag={tag} ds={rec['ds']} -> {path}")
 
 
 def paired_test(a, b):

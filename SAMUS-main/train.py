@@ -73,6 +73,18 @@ def main():
     parser.add_argument('--c2f_lam_fine', type=float, default=1.0, help='细阶段区域损失权重')
     parser.add_argument('--c2f_edge_w', type=float, default=0.5, help='细阶段边缘损失权重')
     parser.add_argument('--c2f_edge_ramp', type=int, default=10, help='细阶段边缘损失前 N 轮升温')
+    # ---- RAG 可训练原型条件化精炼头(PCR head) 开关（均默认关闭，向后兼容原始行为）----
+    parser.add_argument('--rag_head', type=int, default=0, help='1=只训 PCR 头(主干全冻结)，0=原始行为')
+    parser.add_argument('--rag_head_hidden', type=int, default=32, help='PCR 头隐藏通道数')
+    parser.add_argument('--rag_k', type=int, default=5, help='检索 top-k')
+    parser.add_argument('--rag_retr', choices=['roi', 'mean'], default='roi', help='检索向量: ROI加权|均值')
+    parser.add_argument('--rag_shift', type=int, default=1, help='1=训练时对 query 图做域偏移模拟(迫使头依赖检索)，0=关闭')
+    parser.add_argument('--rag_shift_strength', type=float, default=1.0, help='域偏移退化幅度 ∈[0,~1.5]')
+    parser.add_argument('--rag_bank', type=str, default='rag_bank/tn3k_bank.pt', help='源域记忆库 .pt')
+    parser.add_argument('--rag_freeze_all', type=int, default=1, help='1=冻结全部主干只训头，0=连同 adapter 微调')
+    parser.add_argument('--rag_head_lr', type=float, default=1e-3, help='PCR 头学习率')
+    parser.add_argument('--rag_base_ckpt', type=str, default='checkpoints/TN3K/SAMUS_11020447_270_0.8349628402308167.pth',
+                        help='冻结主干的起点权重(ep270)，只训头时先加载它')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -137,7 +149,29 @@ def main():
             else:
                 new_state_dict[k] = v
         model.load_state_dict(new_state_dict, strict=not (args.freq_adapter or args.c2f))
-      
+
+    # ============ RAG 可训练 PCR 头：冻结主干、挂载唯一可训练头、载入记忆库 ============
+    rag_bank = None
+    if args.rag_head:
+        import rag_common as R
+        from rag_head import build_pcr_head
+        # 先加载冻结主干的起点(ep270)。config.pre_trained=False 不会自动加载，故显式装。
+        if args.rag_base_ckpt and os.path.exists(args.rag_base_ckpt):
+            ck = torch.load(args.rag_base_ckpt, map_location="cpu")
+            sd = {(k[7:] if k[:7] == "module." else k): v for k, v in ck.items()}
+            missing, unexpected = model.load_state_dict(sd, strict=False)  # 此时无 pcr.* → missing 属正常
+            print("RAG base ckpt loaded: {} (missing={} unexpected={})".format(
+                os.path.basename(args.rag_base_ckpt), len(missing), len(unexpected)))
+        if args.rag_freeze_all:                     # 默认：只训头，冻结全部主干(含 image_encoder 可训部分/adapter)
+            for param in model.parameters():
+                param.requires_grad = False
+        model.pcr = build_pcr_head(hidden=args.rag_head_hidden).to(opt.device)  # 唯一可训练(RNG 快照隔离)
+        rag_bank = torch.load(args.rag_bank, map_location="cpu")                 # no-grad 常量记忆库
+        head_tr = sum(p.numel() for p in model.pcr.parameters() if p.requires_grad)
+        print("RAG PCR head ON: hidden={} k={} retr={} shift={} strength={} freeze_all={} | head trainable params {}".format(
+            args.rag_head_hidden, args.rag_k, args.rag_retr, bool(args.rag_shift), args.rag_shift_strength,
+            bool(args.rag_freeze_all), head_tr))
+
     if args.n_gpu > 1:
         model = nn.DataParallel(model)
     
@@ -147,6 +181,8 @@ def main():
     else:
         b_lr = args.base_lr
         optimizer = optim.Adam(model.parameters(), lr=args.base_lr, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+    if args.rag_head:   # 只训 PCR 头：AdamW(唯一可训练头, lr=1e-3, wd=0.01)
+        optimizer = torch.optim.AdamW(model.pcr.parameters(), lr=args.rag_head_lr, betas=(0.9, 0.999), weight_decay=0.01)
    
     criterion = get_criterion(modelname=args.modelname, opt=opt,
                               freq_loss_w=(args.freq_loss_w if args.freq_loss else 0.0),
@@ -192,8 +228,20 @@ def main():
             pt = get_click_prompt(datapack, opt)
             # print(imgs.shape) # 8 1 256 256
             # -------------------------------------------------------- forward --------------------------------------------------------
-            pred = model(imgs) # pred = model(imgs, pt, bbox)
-            train_loss = criterion(pred, masks)
+            if args.rag_head:
+                # 域偏移模拟→前向(含 imge)→检索原型逐位置余弦→PCR 头残差精炼→ Dice+BCE(masks_fine, label)
+                imgs_q = R.shift_image(imgs, strength=args.rag_shift_strength) if args.rag_shift else imgs
+                out = model(imgs_q)
+                imge, base = out["imge"], out["masks"]
+                names = [str(x) for x in datapack["image_name"]]          # leave-one-out 屏蔽自身
+                sim_fg, sim_bg = R.prototypes_for_query(imge, rag_bank, args.rag_k,
+                                                        exclude=names, retr=args.rag_retr)
+                masks_fine = model.pcr(imge, base, sim_fg, sim_bg)         # (B,1,256,256)
+                label = datapack["label"].to(dtype=torch.float32, device=opt.device)
+                train_loss = criterion({"low_res_logits": masks_fine}, label)
+            else:
+                pred = model(imgs) # pred = model(imgs, pt, bbox)
+                train_loss = criterion(pred, masks)
             # -------------------------------------------------------- backward -------------------------------------------------------
             optimizer.zero_grad()
             train_loss.backward()
@@ -237,7 +285,11 @@ def main():
             best_vis_dir = vis_root + "best"
             opt.vis_folder = "_latest"
             shutil.rmtree(latest_dir, ignore_errors=True)
-            dices, mean_dice, _, val_losses = get_eval(valloader, model, criterion=criterion, opt=opt, args=args,epoch=epoch)
+            eval_target = model
+            if args.rag_head:   # val 时同走 PCR 头精炼路径(不 shift、不 exclude，val 图不在库内无泄漏)
+                from rag_head import RagEvalRunner
+                eval_target = RagEvalRunner(model, rag_bank, args.rag_k, args.rag_retr)
+            dices, mean_dice, _, val_losses = get_eval(valloader, eval_target, criterion=criterion, opt=opt, args=args,epoch=epoch)
             print('epoch [{}/{}], val loss:{:.4f}'.format(epoch, opt.epochs, val_losses))
             print('epoch [{}/{}], val dice:{:.4f}'.format(epoch, opt.epochs, mean_dice))
             if args.keep_log:

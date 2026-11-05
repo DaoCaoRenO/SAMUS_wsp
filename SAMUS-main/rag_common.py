@@ -137,6 +137,88 @@ def fuse(base_logits, prior32, lam, gate="off", gscale=4.0, gmap=None):
     return base_logits + lam * prior
 
 
+# -------------------------------------------------- PCR 头专用：检索→聚合→逐位置余弦
+def prototypes_for_query(imge, bank, k, exclude=None, retr="roi", rtemp=0.1):
+    """由 query 稠密特征 imge(B,256,FEAT,FEAT) 检索源域原型，返回逐位置与聚合前景/背景
+       原型的余弦图 sim_fg/sim_bg (B,1,FEAT,FEAT)，供 PCRHead 条件化使用。
+       逻辑与 rag_segment 主路一致（非对称 query=全局均值向量→暴力余弦 top-k→softmax 加权
+       聚合 P_fg(=E_roi)/P_bg），统一到公共函数。
+       exclude: list[str] 长度 B——训练时按 image_name 命中 bank names 的自身条目屏蔽
+                (leave-one-out)，杜绝同图自检索泄漏。跨域测试时 query 名不在库内→自然 no-op。"""
+    device = imge.device
+    E_retr = bank["E_roi" if retr == "roi" else "E_mean"].to(device)
+    E_fg = bank["E_roi"].to(device)          # ROI 加权嵌入 == 前景原型 p_fg
+    P_bg_bank = bank["P_bg"].to(device)
+    locs = imge.flatten(2).transpose(1, 2)   # (B,FEAT*FEAT,256)
+    e_q = F.normalize(locs.mean(1), dim=1)   # query 全局均值检索向量
+    sim = (e_q @ E_retr.t()).clamp(-1, 1)    # (B,N) 余弦
+    if exclude is not None:
+        names = bank.get("names", None)
+        if names is not None:
+            for b in range(sim.shape[0]):
+                nm = exclude[b] if isinstance(exclude, (list, tuple)) else None
+                if nm is None:
+                    continue
+                hit = [i for i, x in enumerate(names) if x == nm]
+                if hit:
+                    sim[b, hit] = float("-inf")
+    topv, topi = torch.topk(sim, k=k, dim=1)                 # (B,k)
+    w = F.softmax(topv / max(rtemp, 1e-6), dim=1)
+    P_fg = F.normalize(torch.bmm(w.unsqueeze(1), E_fg[topi]).squeeze(1), dim=1)   # (B,256)
+    P_bg = F.normalize(torch.bmm(w.unsqueeze(1), P_bg_bank[topi]).squeeze(1), dim=1)
+    locn = F.normalize(locs, dim=2)
+    sfg = (locn * P_fg.unsqueeze(1)).sum(2).view(-1, 1, FEAT, FEAT)
+    sbg = (locn * P_bg.unsqueeze(1)).sum(2).view(-1, 1, FEAT, FEAT)
+    return sfg, sbg
+
+
+def _gaussian_kernel(sigma, ksize, device, dtype):
+    coords = torch.arange(ksize, device=device, dtype=dtype) - (ksize - 1) / 2.0
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g = g / g.sum()
+    k2 = (g[:, None] @ g[None, :])
+    return k2.view(1, 1, ksize, ksize)
+
+
+def shift_image(imgs, strength=1.0):
+    """训练时把 query 图退化为「跨域感」，迫使 PCR 头依赖检索先验(而非走域内捷径)。
+       纯张量、mask 无关；imgs(B,C,H,W)∈[0,1]（超声多为 C=1）。逐图随机组合四种退化：
+       对比度抖动 / 高斯噪声 / 高斯模糊 / 中高频幅度衰减(低通)。strength 缩放幅度。"""
+    if strength <= 0:
+        return imgs
+    dev, dt = imgs.device, imgs.dtype
+    B, C = imgs.shape[0], imgs.shape[1]
+    out = imgs
+    # 1) 对比度：围绕每图均值缩放 c∈[1-0.4s, 1+0.4s]
+    c = 1.0 + strength * (torch.rand(B, 1, 1, 1, device=dev, dtype=dt) * 2 - 1) * 0.4
+    mean = out.mean(dim=(1, 2, 3), keepdim=True)
+    out = ((out - mean) * c + mean).clamp(0, 1)
+    # 2) 高斯噪声：σ∈[0, 0.12s]
+    sig = strength * torch.rand(B, 1, 1, 1, device=dev, dtype=dt) * 0.12
+    out = (out + torch.randn_like(out) * sig).clamp(0, 1)
+    # 3) 高斯模糊：逐图以 ~50% 概率做 5×5 低通
+    blur = torch.rand(B, device=dev) < 0.5
+    if bool(blur.any()):
+        ksz = 5
+        k = _gaussian_kernel(1.5 * strength, ksz, dev, dt).expand(C, 1, ksz, ksz)
+        blurred = F.conv2d(out, k, padding=ksz // 2, groups=C).clamp(0, 1)
+        out = torch.where(blur.view(B, 1, 1, 1), blurred, out)
+    # 4) 中高频幅度衰减：fft 后按半径 r∈[0.25,1] 的升序权重线性压低高频(与方案E反向)
+    H, W = out.shape[-2:]
+    Fc = torch.fft.fftshift(torch.fft.fft2(out, dim=(-2, -1)), dim=(-2, -1))
+    ys, xs = torch.meshgrid(
+        torch.linspace(-1, 1, H, device=dev, dtype=dt),
+        torch.linspace(-1, 1, W, device=dev, dtype=dt), indexing="ij")
+    r = torch.sqrt((xs * 0.5) ** 2 + (ys * 0.5) ** 2)
+    attn = strength * torch.rand(B, 1, 1, 1, device=dev, dtype=dt)      # 每图衰减强度∈[0,s]
+    hi = (r >= 0.25 * 0.707).view(1, 1, H, W)                          # bool 高通掩码
+    amp = Fc.abs()
+    amp = torch.where(hi, amp * (1.0 - attn).clamp_min(0.0), amp)
+    out = torch.fft.ifft2(torch.fft.ifftshift(amp * torch.exp(1j * Fc.angle()), dim=(-2, -1)),
+                          dim=(-2, -1)).real.clamp(0, 1)
+    return out.to(dt)
+
+
 # ------------------------------------------------------------------- 指标(对齐 eval_mask_slice2)
 def seg_metrics(seg, gt):
     """seg/gt: (h,w) 二值(bool)。返回百分值 dice,iou,acc,se,sp,hd95。"""
