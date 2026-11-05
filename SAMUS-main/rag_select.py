@@ -17,6 +17,7 @@ from rag_segment import aggregate, hfa_boost
 KS = [1, 5, 10]
 LAMS = [0.25, 0.5, 1.0]
 TAUS = [4.0, 8.0, 16.0]
+GATES = [("off", 0.0)] + [("conf", s) for s in (2.0, 4.0, 8.0)]   # 先参加入方式: 均匀 + 置信门控尺度
 
 
 @torch.no_grad()
@@ -43,20 +44,26 @@ def cache_queries(model, opt, args):
     return {k: torch.cat(v) for k, v in store.items()}
 
 
-def evaluate(C, E_retr, bank_gpu, k, lam, tau, device, rtemp=0.1):
+def evaluate(C, E_retr, bank_gpu, k, lam, tau, device, rtemp=0.1, gate="off", gscale=4.0):
     N = C["imge"].shape[0]
     imge = C["imge"].to(device); base = C["base"].to(device); eq = C["eq"].to(device)
     idx, sim = R.retrieve(eq, E_retr, k)
     w = F.softmax(sim / rtemp, dim=1)
     Pfg, Pbg = aggregate(bank_gpu, idx, w, "softmax")
     prior = R.similarity_map(imge, Pfg, Pbg, tau)
-    fused = R.fuse(base, prior, lam)
+    fused = R.fuse(base, prior, lam, gate, gscale)
     seg = (torch.sigmoid(fused)[:, 0] > 0.5).cpu().numpy()
     gt = C["gt"].numpy()
     dices, ses = [], []
     for j in range(N):
-        m = R.seg_metrics(seg[j], gt[j])
-        dices.append(m[0]); ses.append(m[3])
+        # 选参只需 dice 与 SEN，跳过 Hausdorff（108 组×499 图下大幅提速）
+        s = seg[j]
+        pred_i = np.zeros((1, *s.shape)); pred_i[0][s] = 255
+        g = gt[j]
+        gt_i = np.zeros((1, *g.shape)); gt_i[0][g] = 255
+        dices.append(float(R.metrics.dice_coefficient(pred_i, gt_i)) * 100)
+        _, _, se_v, _ = R.metrics.sespiou_coefficient2(pred_i, gt_i, all=False)
+        ses.append(float(se_v) * 100)
     return float(np.mean(dices)), float(np.mean(ses))
 
 
@@ -83,16 +90,19 @@ def main():
     print(f"[select] val base(λ=0): dice={b_dice:.2f} se={b_se:.2f}", flush=True)
 
     results = []
-    for k, lam, tau in itertools.product(KS, LAMS, TAUS):
-        d, s = evaluate(C, E_retr, bank_gpu, k, lam, tau, device)
-        results.append({"k": k, "lambda": lam, "tau": tau, "val_dice": d, "val_se": s})
-        print(f"  k={k:>2} λ={lam:<4} τ={tau:<4}  val_dice={d:.2f} val_se={s:.2f}", flush=True)
+    for (k, lam, tau, (gate, gs)) in itertools.product(KS, LAMS, TAUS, GATES):
+        d, s = evaluate(C, E_retr, bank_gpu, k, lam, tau, device, gate=gate, gscale=gs)
+        results.append({"k": k, "lambda": lam, "tau": tau, "gate": gate, "gscale": gs,
+                        "val_dice": d, "val_se": s})
+        print(f"  k={k:>2} λ={lam:<4} τ={tau:<4} gate={gate}{(':'+str(gs)) if gate=='conf' else '':<6}  "
+              f"val_dice={d:.2f} val_se={s:.2f}", flush=True)
     # 选参（对齐计划成功判据 §54）：在「val Dice 不回退于 base」的可行域内最大化 SEN；
     # 若可行域为空则退化为纯 SEN 最大。Dice 作平手判据。这样锁定的是 Pareto 提升点，
     # 而非牺牲 Dice 换 SEN 的极端点。
     feasible = [r for r in results if r["val_dice"] >= b_dice - 1e-9]
     pool = feasible if feasible else results
     best = max(pool, key=lambda r: (round(r["val_se"], 3), r["val_dice"]))
+    print(f"[select] feasible(no-dice-reg)={len(feasible)}/{len(results)}")
     payload = {"retr": args.retr, "stack_e": args.stack_e,
                "base": {"val_dice": b_dice, "val_se": b_se},
                "best": best, "grid": results}

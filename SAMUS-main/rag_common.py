@@ -122,9 +122,15 @@ def similarity_map(imge_q, P_fg, P_bg, tau):
     return prior.view(B, 1, FEAT, FEAT)
 
 
-def fuse(base_logits, prior32, lam):
-    """base_logits(B,1,256,256) + lam * 上采样先验(B,1,32,32→256)。"""
+def fuse(base_logits, prior32, lam, gate="off", gscale=4.0):
+    """base_logits(B,1,256,256) + lam * 上采样先验(B,1,32,32→256)。
+       gate="conf"：置信度门控 g=exp(-|base_logits|/gscale)∈(0,1]，只在 SAMUS
+       低置信区(|logit|小、判定犹豫)注入先验，高置信区(g→0)保持原判——用「抬召回
+       不伤精度」的方式补区域。gate="off" 即全局均匀加性(上一版行为)。"""
     prior = F.interpolate(prior32, size=base_logits.shape[-2:], mode="bilinear", align_corners=False)
+    if gate == "conf":
+        g = torch.exp(-(base_logits.abs() / max(gscale, 1e-6)))
+        return base_logits + lam * g * prior
     return base_logits + lam * prior
 
 

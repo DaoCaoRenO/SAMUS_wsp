@@ -64,6 +64,8 @@ def main():
     ap.add_argument("--agg", choices=["softmax", "top1"], default="softmax", help="原型聚合方式")
     ap.add_argument("--retr-temp", dest="rtemp", type=float, default=0.1, help="softmax 温度(越小越锐)")
     ap.add_argument("--stack-e", dest="stack_e", type=float, default=1.0, help="方案E 高频增益(1.0=关)")
+    ap.add_argument("--gate", choices=["off", "conf"], default="off", help="先验注入方式：全局均匀 off | 置信度门控 conf")
+    ap.add_argument("--gscale", type=float, default=4.0, help="置信门控尺度 s（g=exp(-|logit|/s)）")
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(R.HERE, "rag_results.jsonl"))
     ap.add_argument("--emit-table", dest="emit_table", default="",
@@ -81,7 +83,7 @@ def main():
         split = "val" if args.split == "val" else opt.test_split
     loader = R.make_loader(opt, split, batch_size=args.batch)
     print(f"[rag] task={args.task} split={split} k={args.k} λ={args.lam} τ={args.tau} "
-          f"retr={args.retr} agg={args.agg} stack_e={args.stack_e}", flush=True)
+          f"retr={args.retr} agg={args.agg} stack_e={args.stack_e} gate={args.gate} gscale={args.gscale}", flush=True)
 
     names, base_arr, rag_arr = [], [], []
     t0 = time.time()
@@ -99,7 +101,7 @@ def main():
         w = F.softmax(sim / args.rtemp, dim=1) if args.agg == "softmax" else sim
         P_fg, P_bg = aggregate(bank_gpu, idx, w, args.agg)
         prior = R.similarity_map(imge, P_fg, P_bg, args.tau)         # (B,1,32,32)
-        fused = R.fuse(base_logits, prior, args.lam)                 # (B,1,256,256)
+        fused = R.fuse(base_logits, prior, args.lam, args.gate, args.gscale)   # (B,1,256,256)
         seg_base = (torch.sigmoid(base_logits)[:, 0] > 0.5).cpu().numpy()
         seg_rag = (torch.sigmoid(fused)[:, 0] > 0.5).cpu().numpy()
         gtn = gt.cpu().numpy()
@@ -119,6 +121,7 @@ def main():
         "tag": "rag", "ds": args.task, "split": args.split,
         "k": args.k, "lambda": args.lam, "tau": args.tau,
         "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e,
+        "gate": args.gate, "gscale": args.gscale,
         "n": int(len(names)),
         **{f"base_{kk}": float(mb[i]) for i, kk in enumerate(keys)},
         **{kk: float(mr[i]) for i, kk in enumerate(keys)},
