@@ -98,10 +98,36 @@ def report(m, ds):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "freq_adapt_results.jsonl"
+    argv = [a for a in sys.argv[1:]]
+    pair_tags = None
+    if "--pair" in argv:
+        i = argv.index("--pair")
+        pair_tags = (argv[i + 1], argv[i + 2])
+        argv = argv[:i] + argv[i + 3:]
+    path = argv[0] if argv else "freq_adapt_results.jsonl"
     m = load(path)
     have = sorted({ds for (ds, _) in m})
     print(f"[paired] loaded {len(m)} (ds,tag) groups; datasets={have}")
+
+    if pair_tags:                      # §52 通用两配置同图配对(A=基线, B=方法)
+        ta, tb = pair_tags
+        print(f"[paired] generic mode: {ta} -> {tb} (same-image Wilcoxon)")
+        for ds in have:
+            a, b = m.get((ds, ta)), m.get((ds, tb))
+            if not a or not b:
+                print(f"  {ds:<7} 缺 {ta} 或 {tb} 记录，跳过")
+                continue
+            n, md, p, _ = paired(a, b, "dice")
+            _, mds, ps, _ = paired(a, b, "se")
+            print(f"  {ds:<7} n={n:>3}  Δdice={md:+.2f} {star(p) if p==p else ''}(p={p:.3g})"
+                  f"   Δse={mds:+.2f} {star(ps) if ps==ps else ''}"
+                  f"   (SPC 逐图不可得, 见总表均值)")
+        xdom = [ds for ds in XDOMAIN if (ds, ta) in m and (ds, tb) in m]
+        if xdom:
+            ma = np.mean([mean_dice(m, ds, ta) for ds in xdom])
+            mb = np.mean([mean_dice(m, ds, tb) for ds in xdom])
+            print(f"  跨域均值({'/'.join(xdom)}): {ta}={ma:.2f}  {tb}={mb:.2f}  Δ={mb-ma:+.2f}")
+        return
 
     verdicts = {}
     for ds in have:
