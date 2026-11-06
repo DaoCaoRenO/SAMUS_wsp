@@ -85,6 +85,20 @@ def main():
     parser.add_argument('--rag_head_lr', type=float, default=1e-3, help='PCR 头学习率')
     parser.add_argument('--rag_base_ckpt', type=str, default='checkpoints/TN3K/SAMUS_11020447_270_0.8349628402308167.pth',
                         help='冻结主干的起点权重(ep270)，只训头时先加载它')
+    # ---- Phase2B: PCR 头在方案E 增强 base 上重训(rag_head 分支内对 query 图做高频衰减) ----
+    parser.add_argument('--rag_stack_e', type=float, default=0.0,
+                        help='>0 时对 rag_head 分支的 imgs_q 施加 hfa_boost(固定 γ=此值)，0=关')
+    parser.add_argument('--rag_stack_e_adapt', type=float, default=0.0,
+                        help='>0 时逐图自适应 γ(值为高频半径 ratio，如 0.25)，batch 级 E_src_ref；与 --rag_stack_e 互斥')
+    parser.add_argument('--rag_e_ref', type=float, default=0.0,
+                        help='自适应 γ 的 E_src_ref 常数(0=每个 batch 用 batch 中位数自校准)')
+    parser.add_argument('--rag_e_lo', type=float, default=0.5, help='自适应 gain 下限 clamp')
+    parser.add_argument('--rag_e_hi', type=float, default=1.3, help='自适应 gain 上限 clamp')
+    # ---- Phase3B: 全量合成域偏移训练(非 rag_head 分支，主干也见过跨域感图) ----
+    parser.add_argument('--train_shift', type=int, default=0,
+                        help='1=对普通训练分支的 imgs 施加 R.shift_image(合成域偏移)，0=原行为')
+    parser.add_argument('--train_shift_strength', type=float, default=1.0,
+                        help='train_shift 退化幅度 ∈[0,~1.5]')
 
     args = parser.parse_args()
     opt = get_config(args.task)
@@ -231,6 +245,14 @@ def main():
             if args.rag_head:
                 # 域偏移模拟→前向(含 imge)→检索原型逐位置余弦→PCR 头残差精炼→ Dice+BCE(masks_fine, label)
                 imgs_q = R.shift_image(imgs, strength=args.rag_shift_strength) if args.rag_shift else imgs
+                # ---- Phase2B: 在 E 增强后的图(而非原图)上训 PCR 头，与推理链路口径一致 ----
+                if args.rag_stack_e_adapt:
+                    e_i = R.hf_energy_tensor(imgs_q, args.rag_stack_e_adapt)
+                    ref = args.rag_e_ref if args.rag_e_ref > 0 else float(e_i.median())
+                    gain = (ref / e_i.clamp_min(1e-6)).clamp(args.rag_e_lo, args.rag_e_hi)
+                    imgs_q = R.hfa_boost(imgs_q, gain=gain, ratio=args.rag_stack_e_adapt)
+                elif args.rag_stack_e > 0:
+                    imgs_q = R.hfa_boost(imgs_q, gain=args.rag_stack_e)
                 out = model(imgs_q)
                 imge, base = out["imge"], out["masks"]
                 names = [str(x) for x in datapack["image_name"]]          # leave-one-out 屏蔽自身
@@ -240,6 +262,10 @@ def main():
                 label = datapack["label"].to(dtype=torch.float32, device=opt.device)
                 train_loss = criterion({"low_res_logits": masks_fine}, label)
             else:
+                # ---- Phase3B: 全量合成域偏移训练，主干也暴露于跨域感图(对症 zero-shot) ----
+                if args.train_shift:
+                    import rag_common as R
+                    imgs = R.shift_image(imgs, strength=args.train_shift_strength)
                 pred = model(imgs) # pred = model(imgs, pt, bbox)
                 train_loss = criterion(pred, masks)
             # -------------------------------------------------------- backward -------------------------------------------------------

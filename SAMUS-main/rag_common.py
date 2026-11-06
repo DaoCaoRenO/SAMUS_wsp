@@ -219,6 +219,68 @@ def shift_image(imgs, strength=1.0):
     return out.to(dt)
 
 
+# ------------------------------------------------- 方案E：测试时高频幅度增益 / 逐图自适应 γ
+#   γ* 的物理来源：hf_boost.py measure() 给出 γ*=源域(TN3K)高频能量 / 目标域高频能量。
+#   固定 γ = 每域一个常数(magic constant)；本模块把它做成逐图自适应：
+#     gain_i = clamp(E_src_ref / hf_energy(img_i), lo, hi)   —— 纯测试时、无 GT、免训练。
+#   半径口径与 rag_segment.hfa_boost / hf_boost.py 一致(r >= ratio*0.707 视为高频)。
+def hf_freq_radius_mask(H, W, ratio, device, dtype=torch.float32):
+    """归一化半径高频掩码 (H,W) bool：r>=ratio*0.707。与 hfa_boost 口径逐位一致。"""
+    ys, xs = torch.meshgrid(
+        torch.linspace(-1, 1, H, device=device, dtype=dtype),
+        torch.linspace(-1, 1, W, device=device, dtype=dtype), indexing="ij")
+    r = torch.sqrt(((xs * 0.5) ** 2 + (ys * 0.5) ** 2))
+    return r >= (ratio * 0.707)
+
+
+def hfa_boost(img, gain=1.0, ratio=0.25):
+    """对 (B,C,H,W)∈[0,1] 高频幅度(r>=ratio)乘 gain、相位不变(内容/位置不变，GT 原样沿用)。
+       gain 可为标量(固定 γ)，或长度 B 的逐图张量/列表(自适应 γ)。gain==标量 1.0 时恒等返回。"""
+    if not isinstance(gain, (int, float)):
+        g_in = torch.as_tensor(gain)
+        if g_in.numel() == 1 and float(g_in) == 1.0:
+            return img
+    elif gain == 1.0:
+        return img
+    B, C, H, W = img.shape
+    dev, dt = img.device, img.dtype
+    Fc = torch.fft.fftshift(torch.fft.fft2(img, dim=(-2, -1)), dim=(-2, -1))
+    mask = hf_freq_radius_mask(H, W, ratio, dev)
+    amp, pha = Fc.abs(), Fc.angle()
+    g = torch.as_tensor(gain, device=dev, dtype=amp.dtype).view(-1)
+    if g.numel() == 1:
+        g = g.expand(B)
+    amp = torch.where(mask.view(1, 1, H, W), amp * g.view(B, 1, 1, 1), amp)
+    out = torch.fft.ifft2(torch.fft.ifftshift(amp * torch.exp(1j * pha), dim=(-2, -1)),
+                          dim=(-2, -1)).real.clamp(0, 1)
+    return out
+
+
+def hf_energy_tensor(img, ratio=0.25):
+    """每图高频平均幅度 (B,)。img(B,C,H,W)。"""
+    B, C, H, W = img.shape
+    Fc = torch.fft.fftshift(torch.fft.fft2(img.to(dtype=torch.float32), dim=(-2, -1)), dim=(-2, -1))
+    mask = hf_freq_radius_mask(H, W, ratio, img.device)
+    amp = Fc.abs()
+    return amp[..., mask].mean(-1).mean(-1)          # (B,C)→(B,)
+
+
+def source_hf_ref(task="TN3K", split="train", ratio=0.25, batch=16, device=None):
+    """扫描源域图，返回高频能量参考统计(中位数/均值)，供逐图自适应 γ 的 E_src_ref。
+       不建模型，仅过 loader 取 image → 秒级~分钟级；调用方缓存到 json。"""
+    opt = get_config(task)
+    loader = make_loader(opt, split, batch_size=batch)
+    if device is None:
+        device = getattr(opt, "device", "cuda")
+    es = []
+    for dp in loader:
+        imgs = dp["image"].to(device, dtype=torch.float32)
+        es.extend(hf_energy_tensor(imgs, ratio).cpu().tolist())
+    es = np.asarray(es)
+    return {"median": float(np.median(es)), "mean": float(es.mean()),
+            "ratio": float(ratio), "src": f"{task}/{split}", "n": int(len(es))}
+
+
 # ------------------------------------------------------------------- 指标(对齐 eval_mask_slice2)
 def seg_metrics(seg, gt):
     """seg/gt: (h,w) 二值(bool)。返回百分值 dice,iou,acc,se,sp,hd95。"""

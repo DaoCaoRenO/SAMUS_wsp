@@ -22,21 +22,8 @@ import rag_common as R
 
 
 def hfa_boost(img, gain=1.5, ratio=0.25):
-    """方案E 复现（内存版）：对 (B,3,H,W)∈[0,1] 张量高频幅度(r>=ratio)乘 gain，相位不变。"""
-    if gain == 1.0:
-        return img
-    B, C, H, W = img.shape
-    Fc = torch.fft.fftshift(torch.fft.fft2(img, dim=(-2, -1)), dim=(-2, -1))
-    ys, xs = torch.meshgrid(
-        torch.linspace(-1, 1, H, device=img.device),
-        torch.linspace(-1, 1, W, device=img.device), indexing="ij")
-    r = torch.sqrt(((xs * 0.5) ** 2 + (ys * 0.5) ** 2))       # 归一化半径 ∈[0,~0.707]
-    mask = r >= (ratio * 0.707)                                # 与 hf_boost.py 半径口径一致
-    amp, pha = Fc.abs(), Fc.angle()
-    amp = torch.where(mask.view(1, 1, H, W), amp * gain, amp)
-    out = torch.fft.ifft2(torch.fft.ifftshift(amp * torch.exp(1j * pha), dim=(-2, -1)),
-                          dim=(-2, -1)).real.clamp(0, 1)
-    return out
+    """(已上提至 rag_common，保留薄封装向后兼容)对 (B,3,H,W)∈[0,1] 高频幅度(r>=ratio)乘 gain。"""
+    return R.hfa_boost(img, gain=gain, ratio=ratio)
 
 
 def aggregate(bank, idx, w, agg):
@@ -63,7 +50,17 @@ def main():
     ap.add_argument("--retr", choices=["roi", "mean"], default="roi", help="检索向量: ROI加权|均值")
     ap.add_argument("--agg", choices=["softmax", "top1"], default="softmax", help="原型聚合方式")
     ap.add_argument("--retr-temp", dest="rtemp", type=float, default=0.1, help="softmax 温度(越小越锐)")
-    ap.add_argument("--stack-e", dest="stack_e", type=float, default=1.0, help="方案E 高频增益(1.0=关)")
+    ap.add_argument("--stack-e", dest="stack_e", type=float, default=1.0, help="方案E 高频增益(固定 γ；1.0=关)")
+    ap.add_argument("--e-adapt", dest="e_adapt", type=float, default=None,
+                    help="逐图自适应 γ(方案E 升级)，值为高频半径 ratio(如 0.25)；与 --stack-e 互斥")
+    ap.add_argument("--e-ref", default=os.path.join(R.HERE, "rag_bank", "hf_ref.json"),
+                    help="源域高频能量参考 json(缓存 E_src_ref)")
+    ap.add_argument("--e-ref-refresh", dest="e_ref_refresh", action="store_true",
+                    help="强制重算并回写 --e-ref")
+    ap.add_argument("--e-lo", dest="e_lo", type=float, default=0.5, help="自适应 gain 下限 clamp")
+    ap.add_argument("--e-hi", dest="e_hi", type=float, default=1.3, help="自适应 gain 上限 clamp")
+    ap.add_argument("--src-task", dest="src_task", default="TN3K", help="自适应 γ 参考源域 task")
+    ap.add_argument("--src-split", dest="src_split", default="train", help="自适应 γ 参考源域 split")
     ap.add_argument("--gate", choices=["off", "conf", "hole"], default="off",
                     help="先验注入方式：全局均匀 off | 置信度门控 conf | 候选框内部空洞填充 hole")
     ap.add_argument("--gscale", type=float, default=4.0, help="置信门控尺度 s（g=exp(-|logit|/s)）")
@@ -81,6 +78,29 @@ def main():
     bank = torch.load(args.bank, map_location="cpu")
     E_retr = bank["E_roi" if args.retr == "roi" else "E_mean"].to(device)
     bank_gpu = {"E_roi": bank["E_roi"].to(device), "P_bg": bank["P_bg"].to(device)}
+
+    # ---- 方案E 逐图自适应 γ：加载/计算源域高频能量参考 E_src_ref ----
+    E_src_ref = None
+    if args.e_adapt is not None:
+        if args.stack_e != 1.0:
+            raise SystemExit("[rag] --e-adapt 与 --stack-e 互斥(同为方案E，只是自适应/固定之别)")
+        ratio = args.e_adapt
+        ref = None
+        if os.path.exists(args.e_ref) and not args.e_ref_refresh:
+            try:
+                j = json.load(open(args.e_ref))
+                if abs(float(j.get("ratio", -1)) - ratio) < 1e-9 and "median" in j:
+                    ref = j
+            except Exception:
+                ref = None
+        if ref is None:
+            ref = R.source_hf_ref(task=args.src_task, split=args.src_split, ratio=ratio, device=device)
+            os.makedirs(os.path.dirname(args.e_ref), exist_ok=True)
+            json.dump(ref, open(args.e_ref, "w"))
+            print(f"[rag] computed E_src_ref -> {args.e_ref}: {ref}", flush=True)
+        E_src_ref = float(ref["median"])
+        print(f"[rag] E-adapt ON ratio={ratio} E_src_ref(median)={E_src_ref:.3f} "
+              f"clamp=[{args.e_lo},{args.e_hi}] src={ref['src']}", flush=True)
 
     head_on = bool(args.head_ckpt)
     if head_on:
@@ -107,7 +127,11 @@ def main():
     for bi, dp in enumerate(loader):
         imgs = dp["image"].to(device, dtype=torch.float32)
         gt = (dp["label"].to(device, dtype=torch.float32)[:, 0] == 1)   # (B,256,256) bool
-        if args.stack_e != 1.0:
+        if args.e_adapt is not None:
+            e_i = R.hf_energy_tensor(imgs, args.e_adapt)                 # (B,) 每图高频能量
+            gain = (E_src_ref / e_i.clamp_min(1e-6)).clamp(args.e_lo, args.e_hi)
+            imgs = R.hfa_boost(imgs, gain=gain, ratio=args.e_adapt)
+        elif args.stack_e != 1.0:
             imgs = hfa_boost(imgs, gain=args.stack_e)
         imge = R.dense_feat(model, imgs)                    # (B,256,32,32)
         base_logits = R.model_base_logits(model, imgs)      # (B,1,256,256)
@@ -162,7 +186,7 @@ def main():
     rec = {
         "tag": (args.tag if args.tag else ("raghead" if head_on else "rag")), "ds": args.task, "split": args.split,
         "k": args.k, "lambda": args.lam, "tau": args.tau,
-        "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e,
+        "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e, "e_adapt": args.e_adapt,
         "gate": args.gate, "gscale": args.gscale,
         "n": int(len(names)),
         **{f"base_{kk}": float(mb[i]) for i, kk in enumerate(keys)},
@@ -193,12 +217,16 @@ def emit_table_row(path, rec, mr):
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     tag = rec.get("tag", "rag")
     ckpt_name = ("rag_pcr_head" if tag == "raghead" else
+                 "rag_pcr_head_e" if tag == "raghead_e" else
+                 "hf_adapt" if tag == "e_adapt" else
+                 "shift50" if tag == "shift50" else
                  "multi_organ" if tag == "multi_tn3k" else
                  "bl_nothy" if tag == "bl_nothy" else "rag_fused")
     row = {"task": rec["ds"], "model": "SAMUS", "ckpt": ckpt_name,
            "tag": tag, "ds": rec["ds"],
            "params": {"k": rec["k"], "lambda": rec["lambda"], "tau": rec["tau"],
-                      "retr": rec["retr"], "agg": rec["agg"], "stack_e": rec["stack_e"]},
+                      "retr": rec["retr"], "agg": rec["agg"], "stack_e": rec["stack_e"],
+                      "e_adapt": rec.get("e_adapt")},
            "dice_std": rec["dice_std"], "base_dice": rec["base_dice"], "base_se": rec["base_se"],
            **{kk: float(mr[i]) for i, kk in enumerate(keys)}}
     rows = []
