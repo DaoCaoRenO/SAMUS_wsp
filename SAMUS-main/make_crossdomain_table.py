@@ -37,6 +37,10 @@ if os.path.exists(JSONL):
             continue
         rows[(d.get("tag", "?"), d.get("ds", "?"))] = d
 
+def _f(v, dash="-"):
+    """%.2f 或 None→dash (B 的 bl_nothy 行仅有 dice, 其余指标 N/A)。"""
+    return dash if v is None else ("%.2f" % v)
+
 # ---------------- CSV（长表：每行一个 model×dataset） ----------------
 with open(CSV, "w") as f:
     f.write("model,dataset,dice,dice_std,iou,acc,sen,spec,hd95_manhattan\n")
@@ -45,9 +49,9 @@ with open(CSV, "w") as f:
             d = rows.get((tag, ds))
             if not d:
                 continue
-            f.write("%s,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n" % (
-                tag, ds, d["dice"], d.get("dice_std", 0.0), d["iou"],
-                d["acc"], d["se"], d["sp"], d["hdis"]))
+            f.write("%s,%s,%s,%s,%s,%s,%s,%s,%s\n" % (
+                tag, ds, _f(d["dice"]), _f(d.get("dice_std", 0.0)), _f(d["iou"]),
+                _f(d["acc"]), _f(d["se"]), _f(d["sp"]), _f(d["hdis"])))
 
 # ---------------- Markdown（以 Dice 为主表 + 全指标明细） ----------------
 lines = ["# SAMUS 频域改造 A/C 因子消融 — 跨域零样本对比\n"]
@@ -78,8 +82,9 @@ for tag in TAG_ORDER:
         d = rows.get((tag, ds))
         if not d:
             continue
-        lines.append("| %s | %s | %.2f | %.2f | %.2f | %.2f | %.2f | %.2f |" % (
-            TAG_LABEL.get(tag, tag), ds, d["dice"], d["iou"], d["acc"], d["se"], d["sp"], d["hdis"]))
+        lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
+            TAG_LABEL.get(tag, tag), ds, _f(d["dice"], "N/A"), _f(d["iou"], "N/A"),
+            _f(d["acc"], "N/A"), _f(d["se"], "N/A"), _f(d["sp"], "N/A"), _f(d["hdis"], "N/A")))
 
 # ---------------- 2×2 因子消融（均相对 base50 的 ΔDice） ----------------
 lines.append("\n**2×2 因子消融** ΔDice（相对 50轮对照组 base50，百分点；正=有收益）:\n")
