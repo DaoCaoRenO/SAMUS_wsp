@@ -63,10 +63,11 @@ def boost(img_f, mask, gain):
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
-def build(tag, gain, ratio, mask):
+def build(tag, gain, ratio, mask, suffix=""):
     split, sub = TASKS[tag]
+    key = f"{tag}_hf{suffix}"                       # 注册进 class.json / config 的 task 名
     lines = [l.strip() for l in open(os.path.join(DS, "MainPatient", split + ".txt")) if l.strip()]
-    out_root = os.path.join(DS, f"{tag}_hf")
+    out_root = os.path.join(DS, key)
     for d in ("img", "label"):
         os.makedirs(os.path.join(out_root, d), exist_ok=True)
     out_lines, n = [], 0
@@ -80,14 +81,14 @@ def build(tag, gain, ratio, mask):
         link = os.path.join(out_root, "label", fname + ".jpg")
         if not os.path.lexists(link):
             os.symlink(os.path.join(DS, s_sub, "label", fname + ".jpg"), link)
-        out_lines.append(f"{tag}_hf/{fname}/{cls}")
+        out_lines.append(f"{key}/{fname}/{cls}")
         n += 1
-    with open(os.path.join(DS, "MainPatient", f"test_{tag}_hf.txt"), "w") as f:
+    with open(os.path.join(DS, "MainPatient", f"test_{key}.txt"), "w") as f:
         f.write("\n".join(out_lines) + "\n")
     # 注册 class.json（沿用源 tag 的类别数，保证 mask 二值化逻辑一致）
     cjp = os.path.join(DS, "MainPatient", "class.json")
     cj = json.load(open(cjp))
-    cj[f"{tag}_hf"] = cj.get(sub, 2)
+    cj[key] = cj.get(sub, 2)
     json.dump(cj, open(cjp, "w"))
     return n
 
@@ -120,6 +121,9 @@ if __name__ == "__main__":
     ap.add_argument("--ratio", type=float, default=0.25, help="高频半径阈值(归一化 r>=ratio 视为高频)")
     ap.add_argument("--measure", action="store_true", help="只测量源/目标域高频失配并给出 γ*")
     ap.add_argument("--tasks", type=str, default="TN3K,DDTIz,PTz")
+    ap.add_argument("--suffix", type=str, default="",
+                    help="输出目录/split/class.json 名的附加后缀(如 _g06)。默认空=沿用 {tag}_hf，"
+                         "会**原地覆写**历史 _hf 数据；做口径对齐实验时务必给独立后缀。")
     args = ap.parse_args()
 
     if args.measure:
@@ -127,5 +131,6 @@ if __name__ == "__main__":
     else:
         mask = hf_mask(SIZE, SIZE, args.ratio)
         for tag in args.tasks.split(","):
-            n = build(tag.strip(), args.gain, args.ratio, mask)
-            print(f"gain={args.gain} ratio={args.ratio}: {tag} {n} 张 -> {tag}_hf 就绪")
+            tag = tag.strip()
+            n = build(tag, args.gain, args.ratio, mask, suffix=args.suffix)
+            print(f"gain={args.gain} ratio={args.ratio}: {tag} {n} 张 -> {tag}_hf{args.suffix} 就绪")

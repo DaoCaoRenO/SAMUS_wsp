@@ -263,6 +263,23 @@ class Config_PTz_hf(Config_PTz):
     data_subpath = "./dataset/SAMUS/PTz_hf/"
     result_path = "./result/PTz_hf/"
 
+
+def _hf_variant_config(task):
+    """动态注册 `Config_<Base>_hf<suffix>`：支持 hf_boost.py --suffix 产出的独立口径
+    频域增强集（如 DDTIz_hf_g06），避免每换一个 gain 都要改本文件并覆写历史 _hf 数据。
+    仅当 task 形如 <已注册task>_hf<非空后缀> 时生效，其余字段全部继承基类。"""
+    i = task.find("_hf")
+    if i <= 0 or i + 3 >= len(task):
+        return None
+    base, suffix = task[:i], task[i:]                 # 'DDTIz', '_hf_g06'
+    base_cls = {"TN3K": Config_TN3K, "DDTIz": Config_DDTIz, "PTz": Config_PTz}.get(base)
+    if base_cls is None:
+        return None
+    return type("Config_" + task, (base_cls,),
+                {"test_split": "test_" + task,
+                 "data_subpath": base_cls.data_path + task + "/",
+                 "result_path": "./result/" + task + "/"})
+
 # -------------------------------------------------------------------------------------------------
 class Config_MultiOrgan:
     """Experiment A: USIC multi-organ (no thyroid) + TN3K → zero-shot thyroid test."""
@@ -319,6 +336,10 @@ def get_config(task="US30K"):
         return Config_DDTIz_hf()
     elif task == "PTz_hf":
         return Config_PTz_hf()
+    elif "_hf" in task:
+        dyn = _hf_variant_config(task)               # DDTIz_hf_g06 等独立后缀口径
+        if dyn is not None:
+            return dyn()
     elif task == 'KTD':
         return  Config_KTD()
     elif task == "BUSI":

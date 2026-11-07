@@ -71,6 +71,9 @@ def main():
     ap.add_argument("--emit-table", dest="emit_table", default="",
                     help="给定路径时，把本次(锁定参数)结果 upsert 为该跨域总表 jsonl 的一行 rag 记录")
     ap.add_argument("--tag", default="", help="覆盖自动标签(rag/raghead); 用于纯基线评测如 multi_tn3k/bl_nothy")
+    ap.add_argument("--ds-key", dest="ds_key", default="",
+                    help="记录里 ds 字段的归组名(默认=args.task)。口径对齐实验用：把原图 base 与 "
+                         "磁盘增强集 DDTIz_hf_g06 都归到 ds=DDTIz，freq_adapt_paired 才能按 image_name 跨行配对")
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -184,7 +187,8 @@ def main():
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     mb = base_arr.mean(0); mr = rag_arr.mean(0)
     rec = {
-        "tag": (args.tag if args.tag else ("raghead" if head_on else "rag")), "ds": args.task, "split": args.split,
+        "tag": (args.tag if args.tag else ("raghead" if head_on else "rag")),
+        "ds": (args.ds_key or args.task), "ds_raw": args.task, "split": args.split,
         "k": args.k, "lambda": args.lam, "tau": args.tau,
         "retr": args.retr, "agg": args.agg, "stack_e": args.stack_e, "e_adapt": args.e_adapt,
         "gate": args.gate, "gscale": args.gscale,
@@ -219,6 +223,8 @@ def emit_table_row(path, rec, mr):
     ckpt_name = ("rag_pcr_head" if tag == "raghead" else
                  "rag_pcr_head_e" if tag == "raghead_e" else
                  "hf_adapt" if tag == "e_adapt" else
+                 "hf_disk_e" if tag in ("hfal_e", "hfal_e6") else
+                 "hf_disk_head_e" if tag in ("hfal_head", "hfal_head6") else
                  "shift50" if tag == "shift50" else
                  "multi_organ" if tag == "multi_tn3k" else
                  "bl_nothy" if tag == "bl_nothy" else "rag_fused")
