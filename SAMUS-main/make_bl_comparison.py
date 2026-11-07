@@ -23,7 +23,7 @@ BL_MAP = {"TN3K": "TN3K", "DDTI": "DDTIz", "private_Thyroid": "PTz"}  # blsamus 
 HF_MAP = {"TN3K_hf": "TN3K", "DDTIz_hf": "DDTIz", "PTz_hf": "PTz"}    # 方案E 名 -> SAMUS 键
 
 # 与 make_crossdomain_table.py 对齐的展示顺序与标签
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy", "mixedall"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy", "mixedall", "samzs_map", "samzs_amg"]
 TAG_LABEL = {
     "base50":     "SAMUS专科 50轮对照",
     "freq50":     "SAMUS +A(频谱增广)",
@@ -46,8 +46,11 @@ TAG_LABEL = {
     "multi_tn3k": "SAMUS+USIC(无甲状腺)+TN3K 100轮(A)",
     "bl_nothy":   "blsamus+USIC(纯无甲状腺) 100轮(B)",
     "mixedall":   "⭐ SAMUS 混合训练50轮(TN3K+DDTI+PT标注进训练, 非零样本上界对照)",
+    "samzs_map":  "raw SAM(未微调)+原型最近邻(真·零训练归因消融)",
+    "samzs_amg":  "raw SAM(未微调)AMG+原型选掩码(真·零训练归因消融)",
 }
 CAL_SAMUS = "专科 · TN3K域内/DDTI,PT**零样本**"
+CAL_ZS = "**真·零训练**(未微调encoder) · 源域仅当检索库 · 归因消融"
 CAL_BL = "通用多器官 · 甲状腺**多为域内**(训过)"
 
 
@@ -148,7 +151,8 @@ def build_table():
             continue
         lines.append("| " + " | ".join([
             TAG_LABEL.get(tag, tag),
-            ("专科 · 目标域**混训(非零样本)**·上界对照" if tag == "mixedall" else CAL_SAMUS),
+            ("专科 · 目标域**混训(非零样本)**·上界对照" if tag == "mixedall" else
+             CAL_ZS if tag in ("samzs_map", "samzs_amg") else CAL_SAMUS),
             fmt(vals.get("TN3K")), fmt(vals.get("DDTIz")), fmt(vals.get("PTz")), fmt(cross_mean(vals)),
         ]) + " |")
 
