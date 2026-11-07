@@ -9,7 +9,7 @@ MD = os.path.join(HERE, "crossdomain_results.md")
 
 DS_ORDER = ["TN3K", "DDTIz", "PTz"]           # TN3K=域内, 其余=跨域零样本
 DS_LABEL = {"TN3K": "TN3K(域内)", "DDTIz": "DDTI(跨域)", "PTz": "private_Thyroid(跨域)"}
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_head2", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_head2", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy", "mixedall"]
 TAG_LABEL = {
     "base50":     "SAMUS 50轮 对照(无A无C)",
     "freq50":     "SAMUS 50轮 +A(频谱随机化增广)",
@@ -32,6 +32,7 @@ TAG_LABEL = {
     "shift50":    "SAMUS 50轮 +合成域偏移训练(全量train_shift对症对照)",
     "multi_tn3k": "SAMUS+USIC(无甲状腺)+TN3K 100轮(A)",
     "bl_nothy":   "blsamus+USIC(纯无甲状腺) 100轮(B)",
+    "mixedall":   "⭐ SAMUS 混合训练50轮(TN3K+DDTI+PT目标域标注进训练, 非零样本上界对照)",
 }
 
 rows = {}

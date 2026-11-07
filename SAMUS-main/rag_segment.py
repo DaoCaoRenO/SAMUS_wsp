@@ -225,6 +225,7 @@ def emit_table_row(path, rec, mr):
                  "hf_adapt" if tag == "e_adapt" else
                  "hf_disk_e" if tag in ("hfal_e", "hfal_e6") else
                  "hf_disk_head_e" if tag in ("hfal_head", "hfal_head6", "hfal_head2") else
+                 "mixed_all" if tag == "mixedall" else
                  "shift50" if tag == "shift50" else
                  "multi_organ" if tag == "multi_tn3k" else
                  "bl_nothy" if tag == "bl_nothy" else "rag_fused")

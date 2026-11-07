@@ -315,6 +315,43 @@ class Config_MultiOrgan:
     visual = False
     modelname = "SAMUS"
     segmentation_data_path = ""
+class Config_MixedAll:
+    """混合训练对照：TN3K train + DDTI(剔47测试) + private_Thyroid Train(剔44测试) 一起全参微调。
+    非零样本(目标域标注进训练)；评测仍在 DDTIz/PTz/TN3K test 上跑，与零样本/E 结果同尺可比。"""
+    data_path = "./dataset/SAMUS/"
+    data_subpath = "./dataset/SAMUS/TN3K/"   # val/test 基础仍走 TN3K；跨域评测由 rag_segment --task 指定
+    save_path = "./checkpoints/MixedAll/"
+    result_path = "./result/MixedAll/"
+    tensorboard_path = "./tensorboard/MixedAll/"
+    load_path = save_path + "/SAMUS_best.pth"
+    load_classifier_path = ""
+    save_path_code = "_"
+
+    workers = 0
+    epochs = 50
+    batch_size = 8
+    learning_rate = 1e-4
+    momentum = 0.9
+    classes = 2
+    img_size = 256
+    train_split = "train_allsrc"    # 合并训练集(2803)
+    val_split = "val"               # TN3K val 选 best ckpt
+    test_split = "test"             # 不直接用；评测走 rag_segment
+    crop = None
+    eval_freq = 1
+    save_freq = 2000
+    device = "cuda"
+    cuda = "on"
+    gray = "yes"
+    img_channel = 1
+    eval_mode = "mask_slice"
+    pre_trained = False
+    mode = "train"
+    visual = False
+    modelname = "SAMUS"
+    segmentation_data_path = ""
+
+
 def get_config(task="US30K"):
     if task == "US30K":
         return Config_US30K()
@@ -322,6 +359,8 @@ def get_config(task="US30K"):
         return Config_TN3K()
     elif task == "MultiOrgan":
         return Config_MultiOrgan()
+    elif task == "MixedAll":
+        return Config_MixedAll()
     elif task == "DDTIz":
         return Config_DDTIz()
     elif task == "PTz":
