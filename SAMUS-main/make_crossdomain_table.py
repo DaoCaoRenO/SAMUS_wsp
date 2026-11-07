@@ -9,7 +9,7 @@ MD = os.path.join(HERE, "crossdomain_results.md")
 
 DS_ORDER = ["TN3K", "DDTIz", "PTz"]           # TN3K=域内, 其余=跨域零样本
 DS_LABEL = {"TN3K": "TN3K(域内)", "DDTIz": "DDTI(跨域)", "PTz": "private_Thyroid(跨域)"}
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "e_adapt", "hfal_e", "hfal_head", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_head2", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy"]
 TAG_LABEL = {
     "base50":     "SAMUS 50轮 对照(无A无C)",
     "freq50":     "SAMUS 50轮 +A(频谱随机化增广)",
@@ -22,9 +22,11 @@ TAG_LABEL = {
     "rag":        "ep270 +RAG原型检索先验融合(免训练)",
     "raghead":    "ep270 +RAG可训练PCR头(原型条件化精炼,只训头+域偏移模拟)",
     "raghead_e":  "ep270 +RAG PCR头×方案E(高频衰减叠加可学习头)",
+    "raghead_e_tr2": "⭐ ep270 +RAG PCR头×自适应γ(Phase2B: 头在 E 增强 base 上重训)",
     "e_adapt":    "⭐ ep270 +方案E逐图自适应γ(免训练,源域高频能量自校准)",
     "hfal_e":     "ep270 +方案E磁盘口径增益(每域实测最优 gain DDTI0.55/PT0.65;≈63.6 基线)",
     "hfal_head":  "ep270 +RAG PCR头×方案E磁盘口径(每域最优 gain;与 63.6 同尺的 head×E)",
+    "hfal_head2": "⭐ ep270 +RAG PCR头×方案E磁盘口径(Phase2B 重训头;与 hfal_head 同尺对比)",
     "hfal_e6":    "ep270 +方案E磁盘口径增益(三集统一 gain=0.60)",
     "hfal_head6": "ep270 +RAG PCR头×方案E磁盘口径(三集统一 gain=0.60)",
     "shift50":    "SAMUS 50轮 +合成域偏移训练(全量train_shift对症对照)",

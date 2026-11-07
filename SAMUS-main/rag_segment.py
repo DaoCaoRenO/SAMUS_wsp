@@ -221,10 +221,10 @@ def emit_table_row(path, rec, mr):
     keys = ["dice", "iou", "acc", "se", "sp", "hdis"]
     tag = rec.get("tag", "rag")
     ckpt_name = ("rag_pcr_head" if tag == "raghead" else
-                 "rag_pcr_head_e" if tag == "raghead_e" else
+                 "rag_pcr_head_e" if tag in ("raghead_e", "raghead_e_tr2") else
                  "hf_adapt" if tag == "e_adapt" else
                  "hf_disk_e" if tag in ("hfal_e", "hfal_e6") else
-                 "hf_disk_head_e" if tag in ("hfal_head", "hfal_head6") else
+                 "hf_disk_head_e" if tag in ("hfal_head", "hfal_head6", "hfal_head2") else
                  "shift50" if tag == "shift50" else
                  "multi_organ" if tag == "multi_tn3k" else
                  "bl_nothy" if tag == "bl_nothy" else "rag_fused")

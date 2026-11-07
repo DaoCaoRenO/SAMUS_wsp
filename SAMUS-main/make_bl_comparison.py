@@ -23,7 +23,7 @@ BL_MAP = {"TN3K": "TN3K", "DDTI": "DDTIz", "private_Thyroid": "PTz"}  # blsamus 
 HF_MAP = {"TN3K_hf": "TN3K", "DDTIz_hf": "DDTIz", "PTz_hf": "PTz"}    # 方案E 名 -> SAMUS 键
 
 # 与 make_crossdomain_table.py 对齐的展示顺序与标签
-TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "e_adapt", "hfal_e", "hfal_head", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy"]
+TAG_ORDER = ["base50", "freq50", "fad50", "fadaug50", "floss50", "edge50", "c2f50", "ep270_300", "rag", "raghead", "raghead_e", "raghead_e_tr2", "e_adapt", "hfal_e", "hfal_head", "hfal_e6", "hfal_head6", "shift50", "multi_tn3k", "bl_nothy"]
 TAG_LABEL = {
     "base50":     "SAMUS专科 50轮对照",
     "freq50":     "SAMUS +A(频谱增广)",
@@ -36,6 +36,7 @@ TAG_LABEL = {
     "rag":        "SAMUS ep270 +RAG检索原型先验(免训练)",
     "raghead":    "SAMUS ep270 +RAG可训练PCR头(只训头+域偏移模拟)",
     "raghead_e":  "SAMUS ep270 +RAG PCR头×方案E",
+    "raghead_e_tr2": "⭐ SAMUS ep270 +RAG PCR头×自适应γ(Phase2B 重训头)",
     "e_adapt":    "⭐ SAMUS ep270 +方案E逐图自适应γ(免训练)",
     "hfal_e":     "SAMUS ep270 +方案E磁盘口径(每域最优 gain DDTI0.55/PT0.65)",
     "hfal_head":  "SAMUS ep270 +RAG PCR头×方案E磁盘口径(每域最优 gain)",
